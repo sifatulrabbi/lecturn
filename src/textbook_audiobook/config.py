@@ -17,8 +17,12 @@ DEFAULT_BASE_URL: str = "https://api.stepfun.ai/v1"
 DEFAULT_MODEL: str = "stepaudio-2.5-tts"
 ECONOMY_MODEL: str = "step-tts-2"
 # StepFun uses its own voice IDs (NOT OpenAI names like "alloy"). This default
-# is a voice ID documented in StepFun's own API examples.
-DEFAULT_VOICE: str = "cixingnansheng"
+# is the voice used in StepFun's current TTS quick-start example, and is one of
+# the English-keyed voices that appear to be broadly available across accounts.
+# (The previous default, "cixingnansheng", is in the catalogue but returned
+# voice_id_invalid / "you do not have access to it" on a test account — voice
+# entitlement is per-account, so prefer a default with the widest availability.)
+DEFAULT_VOICE: str = "lively-girl"
 DEFAULT_RESPONSE_FORMAT: str = "mp3"
 
 
@@ -44,22 +48,27 @@ MODELS: dict[str, ModelInfo] = {
         price_per_10k_chars=0.40,
         description="Economy alternative, lower cost.",
     ),
-    "step-tts-mini": ModelInfo(
-        name="step-tts-mini",
-        # Pricing not published in PLAN.md; treated as economy-tier for
-        # estimation purposes until confirmed from live docs.
-        price_per_10k_chars=0.40,
-        description="Compact model observed in session notes (pricing unconfirmed).",
-    ),
+    # NOTE: "step-tts-mini" was previously listed here but is NOT returned by the
+    # live GET /v1/models endpoint, so it has been removed — offering it would
+    # only produce a model-rejected error. The two models above are confirmed
+    # present in the live model list.
 }
 
 # StepFun's own voice catalogue (voice IDs accepted by the "voice" parameter),
-# sourced from StepFun's TTS docs. These are NOT OpenAI voice names. Surfaced
-# via `--list-voices`. StepFun also supports voice cloning (out of scope for
-# v1), and the available set may change — validate against a live call.
+# mirrored from StepFun's published TTS docs voice table. These are NOT OpenAI
+# voice names. Surfaced via `--list-voices`. StepFun also supports voice cloning
+# (out of scope for v1).
+#
+# IMPORTANT: presence here means the voice exists in StepFun's catalogue, NOT
+# that it is enabled for your account. Voice access is granted per-account; an
+# ID can return `voice_id_invalid` ("you do not have access to it") even though
+# it is a valid catalogue entry. The English-keyed voices (lively-girl,
+# elegantgentle-female, vibrant-youth, etc.) appear in StepFun's quick-start
+# examples and tend to be the most widely available — prefer them if a
+# Pinyin-keyed voice is rejected.
 VOICES: dict[str, str] = {
     # Male voices
-    "cixingnansheng": "Magnetic Male (StepFun docs default example)",
+    "cixingnansheng": "Magnetic Male",
     "wenrounansheng": "Gentle Male",
     "wenrougongzi": "Tender Gentleman",
     "yuanqinansheng": "Spirited Male",
@@ -69,26 +78,31 @@ VOICES: dict[str, str] = {
     "zixinnansheng": "Confident Male",
     "shuangkuainansheng": "Straightforward Male",
     "zhengpaiqingnian": "Upright Youth",
+    "qingniandaxuesheng": "College Student",
     "magnetic-voiced-male": "Magnetic Male (English-keyed)",
     "soft-spoken-gentleman": "Soft-spoken Gentleman (English-keyed)",
     # Female voices
     "qingchunshaonv": "Pure Girl",
     "yuanqishaonv": "Spirited Girl",
-    "linjiajiejie": "Girl Next Door",
+    "linjiajiejie": "Older Sister Next Door",
+    "linjiameimei": "Younger Sister Next Door",
     "jingdiannvsheng": "Classic Female",
     "tianmeinvsheng": "Sweet Female",
     "wenrounvsheng": "Gentle Female",
+    "wenroushunv": "Gentle Maiden",
+    "wenjingxuejie": "Quiet Senior Schoolmate",
     "ruanmengnvsheng": "Cute Soft Female",
     "ganliannvsheng": "Capable Female",
     "qinhenvsheng": "Warm Female",
+    "qinqienvsheng": "Friendly Female",
+    "huolinvsheng": "Energetic Female",
     "youyanvsheng": "Elegant Female",
     "lengyanyujie": "Cool Beauty",
     "zhixingjiejie": "Intellectual Lady",
     "shuangkuaijiejie": "Bold Sister",
-    "qinqienvsheng": "Friendly Female",
     "jilingshaonv": "Clever Girl",
-    "qingniandaxuesheng": "College Student",
-    "lively-girl": "Lively Girl (English-keyed)",
+    "lively-girl": "Lively Girl (English-keyed, docs default)",
+    "livelybreezy-female": "Lively Breezy Female (English-keyed)",
     "elegantgentle-female": "Elegant Gentle Female (English-keyed)",
     "vibrant-youth": "Vibrant Youth (English-keyed)",
 }

@@ -169,9 +169,11 @@ class StepFunTTSClient:
         if exc.category == "voice":
             return (
                 f"StepFun rejected the voice: {exc} "
-                "Use a valid StepFun voice ID (run `list-voices`); the default "
-                "is 'cixingnansheng'. Note: OpenAI names like 'alloy' are not "
-                "valid StepFun voices."
+                "This voice ID may not be enabled for your account (access is "
+                "per-account). Run `list-voices` and try another — the "
+                "English-keyed voices (e.g. 'lively-girl', 'elegantgentle-female') "
+                "are the most widely available. Note: OpenAI names like 'alloy' "
+                "are not valid StepFun voices."
             )
         if exc.category == "model":
             return (
