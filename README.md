@@ -1,160 +1,49 @@
-# Textbook → Audiobook
+# lecturn
 
-Convert textbooks from **PDF, EPUB, plain text, or Markdown** into narrated
+Convert textbooks — **PDF, EPUB, plain text, or Markdown** — into narrated MP3
 audiobooks using [StepFun's](https://platform.stepfun.ai) TTS API.
-
-The tool runs the full pipeline locally and synchronously:
 
 ```
 load → clean → chunk → synthesize (StepFun TTS) → assemble (MP3 + ID3)
 ```
 
-## Requirements
+- **Chapter-aware** — detects chapters (PDF TOC, EPUB spine, `#`/`##`, `---`) and
+  can emit one tagged MP3 per chapter.
+- **Fast, within limits** — bounded concurrency + an RPM throttle; faster at the
+  same cost.
+- **Resumable** — every chunk is cached with atomic, fingerprinted writes, so an
+  interrupted run continues where it left off without re-billing.
+- **ID3 tags** — title, author, album, and per-chapter track numbers.
 
-- **Python 3.12+**
-- [`uv`](https://docs.astral.sh/uv/) for package management
-- **ffmpeg** on your `PATH` (required by `pydub` for MP3 concatenation)
-  - macOS: `brew install ffmpeg`
-- A StepFun API key
-
-## Install
-
-**As a global command** (recommended) — installs an isolated tool and puts the
-`lecturn` command on your `PATH`:
+## Quick start
 
 ```bash
-uv tool install .
-# then, from anywhere:
-lecturn --help
+uv tool install .                          # install the `lecturn` command
+export STEPFUN_API_KEY="sk-..."            # your StepFun key
+
+lecturn convert mybook.pdf --dry-run       # free: shows plan + cost estimate
+lecturn convert mybook.pdf -o output/      # convert (prompts to confirm cost)
 ```
 
-Update after pulling changes with `uv tool install . --reinstall`; remove with
-`uv tool uninstall textbook-audiobook`. (If `lecturn` isn't found afterwards,
-run `uv tool update-shell` and open a new terminal.)
+`--dry-run`, `lecturn list-models`, and `lecturn list-voices` need no API key.
+Requires **ffmpeg** on your `PATH`.
 
-**From a source checkout** (for development) — no global install:
+## Documentation
 
-```bash
-uv sync                 # creates .venv with pinned deps
-uv run lecturn --help   # run without installing
-```
+| Guide | What's in it |
+| --- | --- |
+| **[docs/SETUP.md](docs/SETUP.md)** | Requirements, install (global or from source), credentials, verifying the install. |
+| **[docs/USAGE.md](docs/USAGE.md)** | Every command and option, extensive example combinations, recipes, speed/cost, resuming, voices, models, troubleshooting, scripting. |
+| **[docs/DEV.md](docs/DEV.md)** | Repo layout, pipeline internals, testing, design decisions & invariants, contributing. |
+| **[PLAN.md](PLAN.md)** | The original design spec. |
 
-## Configure credentials
-
-Set your API key in the environment (never commit it):
-
-```bash
-export STEPFUN_API_KEY="sk-..."        # or STEPFUN_STEP_PLAN_API_KEY
-# optional override:
-export STEPFUN_BASE_URL="https://api.stepfun.ai/v1"
-```
-
-## Usage
-
-Once installed, invoke it as `lecturn` (from a source checkout without
-installing, prefix with `uv run`, e.g. `uv run lecturn ...`).
-
-```bash
-# Single-file audiobook (best-quality default model)
-lecturn convert book.pdf -o output/
-
-# Economy model, one MP3 per chapter
-lecturn convert book.epub --model step-tts-2 --split-by-chapter
-
-# Faster: synthesize 5 chunks at once, throttled to 10 requests/min
-lecturn convert book.pdf --model step-tts-2 --concurrency 5 --rpm 10
-
-# Estimate cost without calling the API
-lecturn convert book.md --dry-run
-
-# Inspect catalogues
-lecturn list-models
-lecturn list-voices
-```
-
-You can also run it as a module: `uv run python -m textbook_audiobook ...`.
-
-### Key options
-
-| Option | Default | Notes |
-| --- | --- | --- |
-| `--model, -m` | `stepaudio-2.5-tts` | Best quality. `step-tts-2` is the economy fallback. |
-| `--fallback-model` | `step-tts-2` | Retried automatically if the primary model is rejected (quota/entitlement/unknown-model). `none` disables it. Not used for auth errors. |
-| `--voice` | `lively-girl` | A StepFun voice ID (not an OpenAI name). See `list-voices`. Voice access is per-account; if one is rejected, try another (English-keyed voices are the most widely available). |
-| `--output, -o` | `output/` | Output directory. |
-| `--split-by-chapter` | off | One MP3 per chapter with track numbers. |
-| `--concurrency, -c` | `3` | Chunks synthesized in parallel. **Faster at the same cost.** Keep ≤ your account's per-model concurrency limit (StepFun: 5); `1` = strictly sequential. |
-| `--rpm` | `10` | Throttle: max requests started per minute. Set to your per-model RPM limit (StepFun: 10). `0` disables it. |
-| `--max-chars` | `1000` | Hard StepFun cap; cannot be exceeded. |
-| `--dry-run` | off | Plan + cost estimate, no synthesis. |
-| `--no-resume` | off | Ignore cached chunk audio and re-synthesize. |
-| `-y, --yes` | off | Skip the cost confirmation prompt. |
-
-### Speed, cost, and rate limits
-
-`--concurrency` only changes **wall-clock time, not cost** — the total characters
-synthesized (and therefore the price) are identical whether serial or parallel.
-The ceiling is your StepFun plan's per-model limits: **concurrency 5** and **10
-requests/min**. Those two happen to match — at ~30s/request, 5 in flight
-produces ~10 completions/min — so `--concurrency 5 --rpm 10` pins you at the
-maximum safe rate (roughly **5× faster** than sequential). Going higher just
-queues behind the throttle and risks 429s.
-
-### Resuming an interrupted run
-
-Every chunk is cached to `output/.audiobook_cache/<book>/` the moment it's
-synthesized, using an **atomic write** (temp file + rename) so an interrupt can
-never leave a half-written file. Cache filenames embed a fingerprint of the
-voice + model + text, so **re-running the exact same command resumes** — already
--done chunks are skipped (not re-billed) — while changing the voice, model, or
-source text correctly invalidates stale audio. Corrupt/empty cache files are
-detected and re-synthesized rather than trusted. Press Ctrl-C any time; re-run to
-continue, or add `--no-resume` to start fresh.
-
-## How it works
-
-- **Loaders** (`loaders/`): one per format. PDF uses PyMuPDF (text-layer only;
-  image-only PDFs are flagged for a future OCR pass). EPUB uses `ebooklib` +
-  BeautifulSoup. Markdown treats `#`/`##` as chapter markers. Plain text splits
-  on `---` delimiters.
-- **Cleaner** (`cleaner.py`): strips page numbers, running headers/footers, and
-  bare URLs; repairs PDF hyphenation; normalises whitespace — per chapter, so
-  chapter boundaries survive.
-- **Chunker** (`chunker.py`): splits each chapter into ≤1000-char chunks on
-  sentence boundaries. Chunks never cross chapters. Oversized single sentences
-  fall back to clause → word → hard-cut splitting.
-- **TTS client** (`tts.py`): OpenAI SDK pointed at StepFun. One
-  `POST /v1/audio/speech` per chunk, full MP3 written to disk **atomically** (no
-  streaming). Exponential backoff honouring `Retry-After` on 429s. Thread-safe,
-  so a single client drives several concurrent workers. Tracks usage for cost.
-- **Assembler** (`assembler.py`): concatenates chunk MP3s (pydub/ffmpeg) into a
-  single file or per-chapter files and writes ID3v2 tags (mutagen).
-- **Pipeline** (`pipeline.py`): orchestration with a Rich progress bar. Bounded
-  concurrency (`--concurrency`) plus an RPM throttle for the network-bound synth
-  stage; fingerprinted, validated per-chunk cache so interrupted runs resume
-  safely.
-
-## Development
-
-```bash
-uv run pytest
-```
-
-Tests are network-free and require no API key. The StepFun transport is stubbed
-to return real ffmpeg-encoded MP3 bytes, so the full pipeline — load, clean,
-chunk, synthesize (stubbed), assemble, ID3 tag — is exercised end to end, plus:
-
-- **Loaders**: Markdown, plain text, PDF (TOC→chapters, metadata, image-only
-  detection), and EPUB (fixtures generated on the fly).
-- **Chunker / cleaner**: the deterministic core.
-- **Assembler**: real pydub/ffmpeg concatenation and mutagen ID3 readback
-  (single-file and per-chapter with track numbers).
-- **TTS client**: retry/backoff, error classification, and model fallback.
-- **CLI**: argument validation, dry-run, and the catalogue commands.
-
-(ffmpeg must be on `PATH` for the audio-path tests, same as for the tool itself.)
+AI agents working in this repo: see [CLAUDE.md](CLAUDE.md).
 
 ## Scope (v1)
 
 Text-only narration. No SSML, no streaming playback, no multi-voice casting, no
-translation, no GUI, no cloud storage. See `PLAN.md` for the full design.
+translation, no GUI, no cloud storage.
+
+## License
+
+MIT — see [`pyproject.toml`](pyproject.toml).
