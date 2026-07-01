@@ -115,7 +115,16 @@ def _synthesize_all(
     resume: bool,
     console: Console,
 ) -> dict[int, Path]:
-    """Synthesize every chunk, returning a map of chunk index -> file path."""
+    """Synthesize every chunk, returning a map of chunk index -> file path.
+
+    IMPORTANT — synthesis is deliberately SEQUENTIAL: chunks are processed one
+    at a time in a plain loop, and each ``synthesize_chunk`` call blocks until
+    its network request completes before the next begins. There is never more
+    than one TTS request in flight. Do NOT parallelise this (thread pool,
+    asyncio, ``executor.map``, etc.): concurrent requests would multiply usage
+    against StepFun's per-account quota and can trip rate limits. The
+    ``test_synthesis_runs_sequentially`` regression test enforces this.
+    """
 
     chunk_files: dict[int, Path] = {}
 

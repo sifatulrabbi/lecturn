@@ -8,6 +8,9 @@ we can get to a live run without consuming StepFun quota.
 
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from textbook_audiobook import pipeline
@@ -131,6 +134,46 @@ def test_empty_document_raises(tmp_path, stub_network):
     with pytest.raises(RuntimeError) as exc:
         pipeline.run_pipeline(src, tmp_path / "out", _config(), max_chars=1000)
     assert "narratable" in str(exc.value).lower()
+
+
+def test_synthesis_runs_sequentially(tmp_path, monkeypatch, mp3_bytes):
+    """Guard against accidental parallelisation of chunk synthesis.
+
+    Concurrent TTS requests would multiply usage against StepFun's per-account
+    quota. This stub records how many requests are ever in flight at once and
+    the order chunks are requested. With the deliberately sequential loop the
+    max concurrency is 1; a thread pool / asyncio.gather / executor.map would
+    push it above 1 (the brief sleep widens the overlap window so real
+    concurrency is observable) and fail this test.
+    """
+
+    monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
+
+    lock = threading.Lock()
+    state = {"in_flight": 0, "max_in_flight": 0}
+    order: list[str] = []
+
+    def fake_request(self, text, model):
+        with lock:
+            state["in_flight"] += 1
+            state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
+            order.append(text)
+        time.sleep(0.02)  # hold the "in flight" state open long enough to catch overlap
+        with lock:
+            state["in_flight"] -= 1
+        return mp3_bytes
+
+    monkeypatch.setattr(StepFunTTSClient, "_request_audio", fake_request)
+
+    src = _write_book(tmp_path)
+    result = pipeline.run_pipeline(src, tmp_path / "out", _config(), max_chars=1000)
+
+    # Meaningful only if there were several chunks to (not) overlap.
+    assert len(result.chunks) >= 2
+    # The core invariant: never more than one TTS request in flight.
+    assert state["max_in_flight"] == 1
+    # Every chunk was requested exactly once, in order.
+    assert len(order) == len(result.chunks)
 
 
 def test_plan_only_no_network(tmp_path, monkeypatch):
