@@ -177,26 +177,36 @@ def _chunk_cache_path(cache_dir: Path, chunk: Chunk, config: StepFunConfig) -> P
     return cache_dir / f"chunk_{chunk.index:05d}_{fp}.mp3"
 
 
-def _is_playable_mp3(path: Path) -> bool:
-    """Return True only if ``path`` is a non-empty, parseable MP3.
+# Minimum plausible size for a real chunk MP3. StepFun chunks are hundreds of KB;
+# anything this small is empty/garbage, not audio.
+_MIN_CACHE_BYTES = 256
 
-    Resume must never trust a cache file just because it exists and is
-    non-empty — a corrupt file would poison assembly. Atomic writes prevent
-    partial files going forward; this check is the belt-and-suspenders that also
-    rejects empty/garbage files from any other cause.
+
+def _is_playable_mp3(path: Path) -> bool:
+    """Return True if ``path`` looks like a complete MP3 worth reusing.
+
+    We check the file is non-trivial in size and begins with an MP3 magic marker
+    (an ID3v2 tag, or a bare MPEG audio frame sync). We deliberately do NOT use a
+    decoder or mutagen's length estimate: StepFun's MP3s carry an ID3v2 header
+    and no Xing/Info frame, so ``mutagen`` reports ``length == 0.0`` for
+    perfectly valid audio — which previously made resume reject every cached
+    chunk and regenerate the whole book. Atomic writes already guarantee a
+    present cache file is fully written, so this magic-byte + size gate is the
+    right validity check: it rejects empty/garbage files without false negatives
+    on real audio.
     """
 
     try:
-        if path.stat().st_size <= 0:
+        if path.stat().st_size < _MIN_CACHE_BYTES:
             return False
+        with open(path, "rb") as fh:
+            head = fh.read(3)
     except OSError:
         return False
-    try:
-        from mutagen.mp3 import MP3  # type: ignore
-
-        return float(getattr(MP3(path).info, "length", 0.0)) > 0.0
-    except Exception:
-        return False
+    if head[:3] == b"ID3":  # ID3v2-tagged MP3 (StepFun's output format)
+        return True
+    # Bare MPEG audio frame sync: 0xFF followed by 0b111xxxxx.
+    return len(head) >= 2 and head[0] == 0xFF and (head[1] & 0xE0) == 0xE0
 
 
 def _make_progress(console: Console) -> Progress:

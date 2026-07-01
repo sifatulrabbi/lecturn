@@ -253,6 +253,38 @@ def test_resume_resynthesizes_when_voice_changes(tmp_path, stub_network):
     assert stub_network["requests"] == n    # every chunk re-synthesized for the new voice
 
 
+def test_is_playable_mp3_accepts_id3_prefixed_audio(tmp_path):
+    """Regression: StepFun MP3s start with ID3 and report mutagen length 0.0.
+
+    They must be accepted for reuse — the old length>0 check rejected every one
+    and forced a full regeneration.
+    """
+
+    from textbook_audiobook.pipeline import _is_playable_mp3
+
+    # ID3v2-tagged file (StepFun's format) with a realistic size.
+    id3 = tmp_path / "id3.mp3"
+    id3.write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x00" * 4000)
+    assert _is_playable_mp3(id3)
+
+    # Bare MPEG frame sync is also valid.
+    framed = tmp_path / "framed.mp3"
+    framed.write_bytes(b"\xff\xfb\x90\x00" + b"\x00" * 4000)
+    assert _is_playable_mp3(framed)
+
+    # Rejected: missing, empty, too-small, and non-MP3 garbage.
+    assert not _is_playable_mp3(tmp_path / "missing.mp3")
+    empty = tmp_path / "empty.mp3"
+    empty.write_bytes(b"")
+    assert not _is_playable_mp3(empty)
+    garbage = tmp_path / "g.mp3"
+    garbage.write_bytes(b"this is not an mp3")
+    assert not _is_playable_mp3(garbage)
+    big_nonmagic = tmp_path / "n.mp3"
+    big_nonmagic.write_bytes(b"\x00" * 4000)
+    assert not _is_playable_mp3(big_nonmagic)
+
+
 def test_plan_only_no_network(tmp_path, monkeypatch):
     # plan_only must never construct a client or hit the network.
     def boom(self):  # pragma: no cover - should never be called
