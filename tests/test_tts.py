@@ -154,3 +154,32 @@ def test_is_quota_error_by_message():
     assert _is_quota_error(Exception("You exceeded your current quota"))
     assert _is_quota_error(Exception("insufficient balance"))
     assert not _is_quota_error(Exception("model not found"))
+
+
+# -- atomic write -----------------------------------------------------------
+
+
+def test_atomic_write_success(tmp_path):
+    from textbook_audiobook import tts
+
+    target = tmp_path / "chunk.mp3"
+    tts._atomic_write_bytes(target, b"hello-audio")
+    assert target.read_bytes() == b"hello-audio"
+    assert list(tmp_path.glob("*.part")) == []  # no temp left behind
+
+
+def test_atomic_write_leaves_no_partial_on_failure(tmp_path, monkeypatch):
+    """If the rename fails mid-write, no partial destination and no temp remain."""
+
+    from textbook_audiobook import tts
+
+    def boom(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(tts.os, "replace", boom)
+    target = tmp_path / "chunk.mp3"
+    with pytest.raises(OSError):
+        tts._atomic_write_bytes(target, b"data")
+
+    assert not target.exists()                   # destination never appears partial
+    assert list(tmp_path.glob("*.part")) == []   # temp cleaned up

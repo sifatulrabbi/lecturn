@@ -65,6 +65,17 @@ def _write_book(tmp_path):
     return src
 
 
+def _write_book_n_chunks(tmp_path, n):
+    """Write a Markdown book with ``n`` short chapters -> ``n`` chunks."""
+
+    parts = ["# Multi-Chapter Book\n"]
+    for i in range(n):
+        parts.append(f"\n## Chapter {i}\n\nBody of chapter {i}. A short sentence.\n")
+    src = tmp_path / "multi.md"
+    src.write_text("".join(parts), encoding="utf-8")
+    return src
+
+
 def test_full_pipeline_single_file(tmp_path, stub_network, mp3_duration_ms):
     src = _write_book(tmp_path)
     out_dir = tmp_path / "out"
@@ -136,44 +147,110 @@ def test_empty_document_raises(tmp_path, stub_network):
     assert "narratable" in str(exc.value).lower()
 
 
-def test_synthesis_runs_sequentially(tmp_path, monkeypatch, mp3_bytes):
-    """Guard against accidental parallelisation of chunk synthesis.
-
-    Concurrent TTS requests would multiply usage against StepFun's per-account
-    quota. This stub records how many requests are ever in flight at once and
-    the order chunks are requested. With the deliberately sequential loop the
-    max concurrency is 1; a thread pool / asyncio.gather / executor.map would
-    push it above 1 (the brief sleep widens the overlap window so real
-    concurrency is observable) and fail this test.
-    """
+def _inflight_tracker(monkeypatch, mp3_bytes, *, sleep=0.03):
+    """Stub _request_audio to record peak in-flight concurrency. Returns state."""
 
     monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
-
     lock = threading.Lock()
-    state = {"in_flight": 0, "max_in_flight": 0}
-    order: list[str] = []
+    state = {"in_flight": 0, "max_in_flight": 0, "count": 0}
 
     def fake_request(self, text, model):
         with lock:
             state["in_flight"] += 1
+            state["count"] += 1
             state["max_in_flight"] = max(state["max_in_flight"], state["in_flight"])
-            order.append(text)
-        time.sleep(0.02)  # hold the "in flight" state open long enough to catch overlap
+        time.sleep(sleep)  # widen the overlap window so real concurrency is observable
         with lock:
             state["in_flight"] -= 1
         return mp3_bytes
 
     monkeypatch.setattr(StepFunTTSClient, "_request_audio", fake_request)
+    return state
+
+
+def test_default_and_concurrency_1_run_sequentially(tmp_path, monkeypatch, mp3_bytes):
+    """The default (and explicit concurrency=1) must keep exactly one request in flight."""
+
+    state = _inflight_tracker(monkeypatch, mp3_bytes)
+    src = _write_book_n_chunks(tmp_path, 6)
+
+    result = pipeline.run_pipeline(
+        src, tmp_path / "out", _config(), max_chars=1000, concurrency=1, rpm=0
+    )
+
+    assert len(result.chunks) >= 4          # meaningful: several chunks to (not) overlap
+    assert state["max_in_flight"] == 1      # never more than one at a time
+    assert state["count"] == len(result.chunks)
+
+
+def test_synthesis_concurrency_is_bounded(tmp_path, monkeypatch, mp3_bytes):
+    """concurrency=3 must actually parallelise but never exceed the bound."""
+
+    state = _inflight_tracker(monkeypatch, mp3_bytes)
+    src = _write_book_n_chunks(tmp_path, 8)
+
+    result = pipeline.run_pipeline(
+        src, tmp_path / "out", _config(), max_chars=1000, concurrency=3, rpm=0
+    )
+
+    assert len(result.chunks) >= 6
+    assert state["max_in_flight"] > 1       # genuinely concurrent
+    assert state["max_in_flight"] <= 3      # never exceeds --concurrency
+    assert state["count"] == len(result.chunks)
+
+
+def test_rate_limiter_caps_starts_per_period():
+    from textbook_audiobook.pipeline import _RateLimiter
+
+    limiter = _RateLimiter(max_calls=3, period=0.3)
+    start = time.monotonic()
+    for _ in range(3):
+        limiter.acquire()                   # first 3 proceed immediately
+    assert time.monotonic() - start < 0.15
+    limiter.acquire()                       # 4th must wait out the window
+    assert time.monotonic() - start >= 0.25
+
+    # max_calls <= 0 disables throttling entirely.
+    unlimited = _RateLimiter(max_calls=0)
+    t = time.monotonic()
+    for _ in range(200):
+        unlimited.acquire()
+    assert time.monotonic() - t < 0.1
+
+
+def test_resume_rejects_corrupt_cache(tmp_path, stub_network):
+    """A cached file that isn't a valid MP3 must be re-synthesized, not trusted."""
 
     src = _write_book(tmp_path)
-    result = pipeline.run_pipeline(src, tmp_path / "out", _config(), max_chars=1000)
+    out = tmp_path / "out"
+    first = pipeline.run_pipeline(src, out, _config(), max_chars=1000)
+    n = len(first.chunks)
+    assert stub_network["requests"] == n
 
-    # Meaningful only if there were several chunks to (not) overlap.
-    assert len(result.chunks) >= 2
-    # The core invariant: never more than one TTS request in flight.
-    assert state["max_in_flight"] == 1
-    # Every chunk was requested exactly once, in order.
-    assert len(order) == len(result.chunks)
+    cache = out / ".audiobook_cache" / first.document.slug
+    files = sorted(cache.glob("chunk_*.mp3"))
+    files[0].write_bytes(b"this is not an mp3")    # corrupt one cached chunk
+
+    stub_network["requests"] = 0
+    pipeline.run_pipeline(src, out, _config(), max_chars=1000, resume=True)
+    # Only the corrupt chunk is redone; the valid ones are reused.
+    assert stub_network["requests"] == 1
+
+
+def test_resume_resynthesizes_when_voice_changes(tmp_path, stub_network):
+    """Changing the voice changes the fingerprint, so stale audio isn't reused."""
+
+    src = _write_book(tmp_path)
+    out = tmp_path / "out"
+    cfg_a = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
+    first = pipeline.run_pipeline(src, out, cfg_a, max_chars=1000)
+    n = len(first.chunks)
+    assert stub_network["requests"] == n
+
+    stub_network["requests"] = 0
+    cfg_b = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="vibrant-youth")
+    pipeline.run_pipeline(src, out, cfg_b, max_chars=1000, resume=True)
+    assert stub_network["requests"] == n    # every chunk re-synthesized for the new voice
 
 
 def test_plan_only_no_network(tmp_path, monkeypatch):

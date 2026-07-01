@@ -28,6 +28,7 @@ from textbook_audiobook.config import (
 )
 from textbook_audiobook.loaders import LoaderError, SUPPORTED_EXTENSIONS
 from textbook_audiobook import pipeline
+from textbook_audiobook.pipeline import DEFAULT_RPM, MAX_USEFUL_CONCURRENCY
 
 app = typer.Typer(
     add_completion=False,
@@ -39,7 +40,9 @@ console = Console()
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"lecturn {__version__}")
+        # highlight=False so Rich doesn't inject ANSI colour into the version
+        # number — keeps `lecturn --version` clean for piping/parsing.
+        console.print(f"lecturn {__version__}", highlight=False)
         raise typer.Exit()
 
 
@@ -98,6 +101,23 @@ def convert(
         False, "--no-resume",
         help="Re-synthesize all chunks even if cached audio exists.",
     ),
+    concurrency: int = typer.Option(
+        3, "--concurrency", "-c",
+        help=(
+            "Number of chunks to synthesize in parallel. Speeds up the run at "
+            "the same cost. Keep at/under your account's per-model concurrency "
+            f"limit (StepFun: {MAX_USEFUL_CONCURRENCY}). Use 1 for strictly "
+            "sequential."
+        ),
+    ),
+    rpm: int = typer.Option(
+        DEFAULT_RPM, "--rpm",
+        help=(
+            "Max requests started per minute (throttle). Set to your account's "
+            f"per-model RPM limit (StepFun: {DEFAULT_RPM}). 0 disables the "
+            "throttle."
+        ),
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run",
         help="Load, clean, and chunk only; print stats and cost estimate. No API calls.",
@@ -116,6 +136,19 @@ def convert(
         raise typer.Exit(code=2)
     if max_chars <= 0:
         console.print("[red]--max-chars must be positive.[/red]")
+        raise typer.Exit(code=2)
+
+    if concurrency < 1:
+        console.print("[red]--concurrency must be at least 1.[/red]")
+        raise typer.Exit(code=2)
+    if concurrency > MAX_USEFUL_CONCURRENCY:
+        console.print(
+            f"[yellow]Warning:[/yellow] --concurrency {concurrency} exceeds "
+            f"StepFun's per-model concurrency limit ({MAX_USEFUL_CONCURRENCY}); "
+            "extra requests will just queue behind the --rpm throttle."
+        )
+    if rpm < 0:
+        console.print("[red]--rpm cannot be negative (use 0 to disable).[/red]")
         raise typer.Exit(code=2)
 
     if model not in MODELS:
@@ -175,8 +208,17 @@ def convert(
             split_by_chapter=split_by_chapter,
             fallback_model=resolved_fallback,
             resume=not no_resume,
+            concurrency=concurrency,
+            rpm=rpm,
             console=console,
         )
+    except KeyboardInterrupt:
+        console.print(
+            "\n[yellow]Interrupted.[/yellow] Completed chunks are cached — "
+            "re-run the same command to resume from where it stopped "
+            "(or pass --no-resume to start over)."
+        )
+        raise typer.Exit(code=130)
     except (LoaderError, RuntimeError) as exc:
         console.print(f"[red]Pipeline failed:[/red] {exc}")
         raise typer.Exit(code=1)

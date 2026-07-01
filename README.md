@@ -61,6 +61,9 @@ lecturn convert book.pdf -o output/
 # Economy model, one MP3 per chapter
 lecturn convert book.epub --model step-tts-2 --split-by-chapter
 
+# Faster: synthesize 5 chunks at once, throttled to 10 requests/min
+lecturn convert book.pdf --model step-tts-2 --concurrency 5 --rpm 10
+
 # Estimate cost without calling the API
 lecturn convert book.md --dry-run
 
@@ -80,10 +83,33 @@ You can also run it as a module: `uv run python -m textbook_audiobook ...`.
 | `--voice` | `lively-girl` | A StepFun voice ID (not an OpenAI name). See `list-voices`. Voice access is per-account; if one is rejected, try another (English-keyed voices are the most widely available). |
 | `--output, -o` | `output/` | Output directory. |
 | `--split-by-chapter` | off | One MP3 per chapter with track numbers. |
+| `--concurrency, -c` | `3` | Chunks synthesized in parallel. **Faster at the same cost.** Keep ≤ your account's per-model concurrency limit (StepFun: 5); `1` = strictly sequential. |
+| `--rpm` | `10` | Throttle: max requests started per minute. Set to your per-model RPM limit (StepFun: 10). `0` disables it. |
 | `--max-chars` | `1000` | Hard StepFun cap; cannot be exceeded. |
 | `--dry-run` | off | Plan + cost estimate, no synthesis. |
 | `--no-resume` | off | Ignore cached chunk audio and re-synthesize. |
 | `-y, --yes` | off | Skip the cost confirmation prompt. |
+
+### Speed, cost, and rate limits
+
+`--concurrency` only changes **wall-clock time, not cost** — the total characters
+synthesized (and therefore the price) are identical whether serial or parallel.
+The ceiling is your StepFun plan's per-model limits: **concurrency 5** and **10
+requests/min**. Those two happen to match — at ~30s/request, 5 in flight
+produces ~10 completions/min — so `--concurrency 5 --rpm 10` pins you at the
+maximum safe rate (roughly **5× faster** than sequential). Going higher just
+queues behind the throttle and risks 429s.
+
+### Resuming an interrupted run
+
+Every chunk is cached to `output/.audiobook_cache/<book>/` the moment it's
+synthesized, using an **atomic write** (temp file + rename) so an interrupt can
+never leave a half-written file. Cache filenames embed a fingerprint of the
+voice + model + text, so **re-running the exact same command resumes** — already
+-done chunks are skipped (not re-billed) — while changing the voice, model, or
+source text correctly invalidates stale audio. Corrupt/empty cache files are
+detected and re-synthesized rather than trusted. Press Ctrl-C any time; re-run to
+continue, or add `--no-resume` to start fresh.
 
 ## How it works
 
@@ -98,12 +124,15 @@ You can also run it as a module: `uv run python -m textbook_audiobook ...`.
   sentence boundaries. Chunks never cross chapters. Oversized single sentences
   fall back to clause → word → hard-cut splitting.
 - **TTS client** (`tts.py`): OpenAI SDK pointed at StepFun. One
-  `POST /v1/audio/speech` per chunk, full MP3 written to disk (no streaming).
-  Exponential backoff honouring `Retry-After` on 429s. Tracks usage for cost.
+  `POST /v1/audio/speech` per chunk, full MP3 written to disk **atomically** (no
+  streaming). Exponential backoff honouring `Retry-After` on 429s. Thread-safe,
+  so a single client drives several concurrent workers. Tracks usage for cost.
 - **Assembler** (`assembler.py`): concatenates chunk MP3s (pydub/ffmpeg) into a
   single file or per-chapter files and writes ID3v2 tags (mutagen).
-- **Pipeline** (`pipeline.py`): synchronous orchestration with a Rich progress
-  bar. Caches synthesized chunks so interrupted runs resume.
+- **Pipeline** (`pipeline.py`): orchestration with a Rich progress bar. Bounded
+  concurrency (`--concurrency`) plus an RPM throttle for the network-bound synth
+  stage; fingerprinted, validated per-chunk cache so interrupted runs resume
+  safely.
 
 ## Development
 

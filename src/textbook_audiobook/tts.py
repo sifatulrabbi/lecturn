@@ -11,12 +11,42 @@ on rate-limit (429) responses.
 
 from __future__ import annotations
 
+import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from textbook_audiobook.config import HARD_CHAR_LIMIT, StepFunConfig
 from textbook_audiobook.models import Chunk
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` atomically.
+
+    Writes to a unique temp file in the same directory, flushes+fsyncs, then
+    ``os.replace``s it into place (an atomic rename on the same filesystem).
+    Guarantees the destination file is either absent or complete — never
+    partially written — so an interrupt (Ctrl-C/crash/power loss) mid-write
+    cannot leave a corrupt cache file that resume would later trust. Safe under
+    concurrency: each call uses a distinct temp name (pid + thread id).
+    """
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.part")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    finally:
+        # If os.replace succeeded the temp is gone; this only cleans up when the
+        # write or replace failed partway.
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class TTSError(RuntimeError):
@@ -47,6 +77,11 @@ class StepFunTTSClient:
     _client: object | None = field(default=None, init=False, repr=False)
     # The model actually in use; switches to fallback_model after a fallback.
     _active_model: str = field(default="", init=False, repr=False)
+    # Guards mutable shared state (stats + _active_model) so a single client can
+    # be driven from several worker threads concurrently (see pipeline
+    # --concurrency). The network call itself is made through the OpenAI client,
+    # which is safe for concurrent use.
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._client = self._build_client()
@@ -54,7 +89,8 @@ class StepFunTTSClient:
 
     @property
     def active_model(self) -> str:
-        return self._active_model or self.config.model
+        with self._lock:
+            return self._active_model or self.config.model
 
     def _build_client(self):
         try:
@@ -90,25 +126,34 @@ class StepFunTTSClient:
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
+        with self._lock:
+            active_model = self._active_model
+
         try:
-            return self._attempt_with_retries(text, out_path, self._active_model)
+            return self._attempt_with_retries(text, out_path, active_model)
         except _FatalError as exc:
             can_fallback = (
                 exc.fallback_eligible
                 and self.fallback_model is not None
-                and self.fallback_model != self._active_model
+                and self.fallback_model != active_model
             )
             if not can_fallback:
-                self.stats.failures += 1
+                with self._lock:
+                    self.stats.failures += 1
                 raise TTSError(self._explain(exc)) from (exc.__cause__ or exc)
 
         # Fall back to the economy model and retry the whole document from here.
-        self.stats.fallbacks += 1
-        self._active_model = self.fallback_model  # type: ignore[assignment]
+        # Under concurrency, several threads may hit the dead primary at once;
+        # flipping to the same fallback model repeatedly is idempotent.
+        with self._lock:
+            self.stats.fallbacks += 1
+            self._active_model = self.fallback_model  # type: ignore[assignment]
+            active_model = self._active_model
         try:
-            return self._attempt_with_retries(text, out_path, self._active_model)
+            return self._attempt_with_retries(text, out_path, active_model)
         except _FatalError as exc:
-            self.stats.failures += 1
+            with self._lock:
+                self.stats.failures += 1
             raise TTSError(self._explain(exc)) from (exc.__cause__ or exc)
 
     def _attempt_with_retries(
@@ -123,15 +168,20 @@ class StepFunTTSClient:
             attempts = attempt + 1
             try:
                 audio_bytes = self._request_audio(text, model)
-                out_path.write_bytes(audio_bytes)
-                self.stats.requests += 1
-                self.stats.characters += len(text)
+                # Atomic write: the cache file only appears once fully written,
+                # so an interrupt can never leave a partial file that resume
+                # would wrongly trust.
+                _atomic_write_bytes(out_path, audio_bytes)
+                with self._lock:
+                    self.stats.requests += 1
+                    self.stats.characters += len(text)
                 return out_path
             except _RetryableError as exc:
                 last_exc = exc
                 if attempt >= self.max_retries:
                     break
-                self.stats.retries += 1
+                with self._lock:
+                    self.stats.retries += 1
                 delay = exc.retry_after if exc.retry_after is not None else (
                     min(self.base_backoff * (2**attempt), self.max_backoff)
                 )
@@ -143,7 +193,8 @@ class StepFunTTSClient:
                 last_exc = exc
                 break
 
-        self.stats.failures += 1
+        with self._lock:
+            self.stats.failures += 1
         plural = "s" if attempts != 1 else ""
         raise TTSError(
             f"Failed to synthesize with model '{model}' after {attempts} "
