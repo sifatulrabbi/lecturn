@@ -19,11 +19,25 @@ load → clean → chunk → synthesize (StepFun TTS) → assemble (MP3 + ID3)
 
 ## Install
 
+**As a global command** (recommended) — installs an isolated tool and puts the
+`lecturn` command on your `PATH`:
+
 ```bash
-uv sync
+uv tool install .
+# then, from anywhere:
+lecturn --help
 ```
 
-This creates a `.venv` with all dependencies pinned from `pyproject.toml`.
+Update after pulling changes with `uv tool install . --reinstall`; remove with
+`uv tool uninstall textbook-audiobook`. (If `lecturn` isn't found afterwards,
+run `uv tool update-shell` and open a new terminal.)
+
+**From a source checkout** (for development) — no global install:
+
+```bash
+uv sync                 # creates .venv with pinned deps
+uv run lecturn --help   # run without installing
+```
 
 ## Configure credentials
 
@@ -37,19 +51,22 @@ export STEPFUN_BASE_URL="https://api.stepfun.ai/v1"
 
 ## Usage
 
+Once installed, invoke it as `lecturn` (from a source checkout without
+installing, prefix with `uv run`, e.g. `uv run lecturn ...`).
+
 ```bash
 # Single-file audiobook (best-quality default model)
-uv run textbook-audiobook convert book.pdf -o output/
+lecturn convert book.pdf -o output/
 
 # Economy model, one MP3 per chapter
-uv run textbook-audiobook convert book.epub --model step-tts-2 --split-by-chapter
+lecturn convert book.epub --model step-tts-2 --split-by-chapter
 
 # Estimate cost without calling the API
-uv run textbook-audiobook convert book.md --dry-run
+lecturn convert book.md --dry-run
 
 # Inspect catalogues
-uv run textbook-audiobook list-models
-uv run textbook-audiobook list-voices
+lecturn list-models
+lecturn list-voices
 ```
 
 You can also run it as a module: `uv run python -m textbook_audiobook ...`.

@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.scripts]
-textbook-audiobook = "textbook_audiobook.cli:app"
+lecturn = "textbook_audiobook.cli:app"
 
 [project.optional-dependencies]
 dev = [

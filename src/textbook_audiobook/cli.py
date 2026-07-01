@@ -39,7 +39,7 @@ console = Console()
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"textbook-audiobook {__version__}")
+        console.print(f"lecturn {__version__}")
         raise typer.Exit()
 
 
