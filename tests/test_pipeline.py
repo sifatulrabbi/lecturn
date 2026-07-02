@@ -14,8 +14,11 @@ import time
 import pytest
 
 from textbook_audiobook import pipeline
-from textbook_audiobook.config import StepFunConfig
-from textbook_audiobook.tts import StepFunTTSClient
+from textbook_audiobook.config import TTSConfig
+from textbook_audiobook.providers.stepfun import StepFunProvider
+from textbook_audiobook.tts import TTSClient
+
+_PROVIDER = StepFunProvider()
 
 
 BOOK = """# The Art of Clear Thinking
@@ -33,25 +36,26 @@ There are two systems at work in every decision. One is fast; one is slow.
 
 @pytest.fixture
 def stub_network(monkeypatch, mp3_bytes):
-    """Make StepFunTTSClient return real MP3 bytes instead of calling the API.
+    """Make TTSClient return real MP3 bytes instead of calling the API.
 
     Returns a counter dict so tests can assert how many synth requests happened.
     """
 
     counter = {"requests": 0}
 
-    monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
+    monkeypatch.setattr(TTSClient, "_build_client", lambda self: object())
 
     def fake_request(self, text, model):
         counter["requests"] += 1
         return mp3_bytes
 
-    monkeypatch.setattr(StepFunTTSClient, "_request_audio", fake_request)
+    monkeypatch.setattr(TTSClient, "_request_audio", fake_request)
     return counter
 
 
-def _config() -> StepFunConfig:
-    return StepFunConfig(
+def _config() -> TTSConfig:
+    return TTSConfig(
+        provider=_PROVIDER,
         api_key="x",
         base_url="http://x",
         model="stepaudio-2.5-tts",
@@ -150,7 +154,7 @@ def test_empty_document_raises(tmp_path, stub_network):
 def _inflight_tracker(monkeypatch, mp3_bytes, *, sleep=0.03):
     """Stub _request_audio to record peak in-flight concurrency. Returns state."""
 
-    monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
+    monkeypatch.setattr(TTSClient, "_build_client", lambda self: object())
     lock = threading.Lock()
     state = {"in_flight": 0, "max_in_flight": 0, "count": 0}
 
@@ -164,7 +168,7 @@ def _inflight_tracker(monkeypatch, mp3_bytes, *, sleep=0.03):
             state["in_flight"] -= 1
         return mp3_bytes
 
-    monkeypatch.setattr(StepFunTTSClient, "_request_audio", fake_request)
+    monkeypatch.setattr(TTSClient, "_request_audio", fake_request)
     return state
 
 
@@ -242,13 +246,13 @@ def test_resume_resynthesizes_when_voice_changes(tmp_path, stub_network):
 
     src = _write_book(tmp_path)
     out = tmp_path / "out"
-    cfg_a = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
+    cfg_a = TTSConfig(provider=_PROVIDER, api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
     first = pipeline.run_pipeline(src, out, cfg_a, max_chars=1000)
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
     stub_network["requests"] = 0
-    cfg_b = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="vibrant-youth")
+    cfg_b = TTSConfig(provider=_PROVIDER, api_key="x", base_url="http://x", model="step-tts-2", voice="vibrant-youth")
     pipeline.run_pipeline(src, out, cfg_b, max_chars=1000, resume=True)
     assert stub_network["requests"] == n    # every chunk re-synthesized for the new voice
 
@@ -262,13 +266,13 @@ def test_resume_reuses_cache_across_model_switch(tmp_path, stub_network):
 
     src = _write_book(tmp_path)
     out = tmp_path / "out"
-    premium = StepFunConfig(api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="lively-girl")
+    premium = TTSConfig(provider=_PROVIDER, api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="lively-girl")
     first = pipeline.run_pipeline(src, out, premium, max_chars=1000)
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
     stub_network["requests"] = 0
-    economy = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
+    economy = TTSConfig(provider=_PROVIDER, api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
     pipeline.run_pipeline(src, out, economy, max_chars=1000, resume=True)
     assert stub_network["requests"] == 0    # same voice+text -> cache reused despite model change
 
@@ -305,16 +309,38 @@ def test_is_playable_mp3_accepts_id3_prefixed_audio(tmp_path):
     assert not _is_playable_mp3(big_nonmagic)
 
 
+def test_chunk_fingerprint_includes_provider():
+    """Same voice+format+text but a different provider -> different cache key.
+
+    A voice ID like 'alloy' can exist under more than one provider yet produce
+    different audio, so switching providers must not silently reuse another
+    provider's cache.
+    """
+
+    from textbook_audiobook.pipeline import _chunk_fingerprint
+    from textbook_audiobook.providers.openrouter import OpenRouterProvider
+
+    text = "The quick brown fox."
+    step = TTSConfig(provider=_PROVIDER, api_key="x", base_url="http://x",
+                     model="m", voice="alloy")
+    other = TTSConfig(provider=OpenRouterProvider(), api_key="x", base_url="http://x",
+                      model="m", voice="alloy")
+    assert _chunk_fingerprint(step, text) != _chunk_fingerprint(other, text)
+    # Deterministic for the same provider+voice+text.
+    assert _chunk_fingerprint(step, text) == _chunk_fingerprint(step, text)
+
+
 def test_plan_only_no_network(tmp_path, monkeypatch):
     # plan_only must never construct a client or hit the network.
     def boom(self):  # pragma: no cover - should never be called
         raise AssertionError("plan_only must not build a TTS client")
 
-    monkeypatch.setattr(StepFunTTSClient, "_build_client", boom)
+    monkeypatch.setattr(TTSClient, "_build_client", boom)
 
     src = _write_book(tmp_path)
     doc, chunks, cost = pipeline.plan_only(
-        src, title=None, author=None, max_chars=1000, model="stepaudio-2.5-tts"
+        src, provider=_PROVIDER, title=None, author=None,
+        max_chars=1000, model="stepaudio-2.5-tts",
     )
     assert len(chunks) > 0
     assert cost > 0

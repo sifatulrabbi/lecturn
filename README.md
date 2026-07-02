@@ -1,12 +1,16 @@
 # lecturn
 
 Convert textbooks — **PDF, EPUB, plain text, or Markdown** — into narrated MP3
-audiobooks using [StepFun's](https://platform.stepfun.ai) TTS API.
+audiobooks using a pluggable TTS **provider**:
+[StepFun](https://platform.stepfun.ai) or [OpenRouter](https://openrouter.ai).
 
 ```
-load → clean → chunk → synthesize (StepFun TTS) → assemble (MP3 + ID3)
+load → clean → chunk → synthesize (StepFun | OpenRouter TTS) → assemble (MP3 + ID3)
 ```
 
+- **Multi-provider** — pick a backend with `--provider`; each brings its own
+  models, voices, pricing, and limits. Adding another OpenAI-compatible provider
+  is a small, self-contained module.
 - **Chapter-aware** — detects chapters (PDF TOC, EPUB spine, `#`/`##`, `---`) and
   can emit one tagged MP3 per chapter.
 - **Fast, within limits** — bounded concurrency + an RPM throttle; faster at the
@@ -19,14 +23,16 @@ load → clean → chunk → synthesize (StepFun TTS) → assemble (MP3 + ID3)
 
 ```bash
 uv tool install .                          # install the `lecturn` command
-export STEPFUN_API_KEY="sk-..."            # your StepFun key
+export STEPFUN_API_KEY="sk-..."            # your provider key (or OPENROUTER_API_KEY)
 
-lecturn convert mybook.pdf --dry-run       # free: shows plan + cost estimate
-lecturn convert mybook.pdf -o output/      # convert (prompts to confirm cost)
+lecturn list-providers                                   # see the available providers
+lecturn convert mybook.pdf -p stepfun --dry-run          # free: shows plan + cost estimate
+lecturn convert mybook.pdf -p stepfun -o output/         # convert (prompts to confirm cost)
 ```
 
-`--dry-run`, `lecturn list-models`, and `lecturn list-voices` need no API key.
-Requires **ffmpeg** on your `PATH`.
+`--provider` is required. `--dry-run`, `lecturn list-providers`,
+`lecturn list-models`, and `lecturn list-voices` need no API key. Requires
+**ffmpeg** on your `PATH`.
 
 ## Documentation
 

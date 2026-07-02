@@ -10,24 +10,28 @@ from pathlib import Path
 
 import pytest
 
-from textbook_audiobook.config import StepFunConfig
+from textbook_audiobook.config import TTSConfig
+from textbook_audiobook.providers.base import (
+    is_quota_error as _is_quota_error,
+    is_voice_error as _is_voice_error,
+)
+from textbook_audiobook.providers.stepfun import StepFunProvider
 from textbook_audiobook.tts import (
-    StepFunTTSClient,
+    TTSClient,
     TTSError,
     _FatalError,
     _RetryableError,
-    _is_quota_error,
-    _is_voice_error,
 )
 
 
-def _client(monkeypatch, **kw) -> StepFunTTSClient:
+def _client(monkeypatch, **kw) -> TTSClient:
     # Skip building a real OpenAI client.
-    monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
-    cfg = StepFunConfig(
-        api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="alloy"
+    monkeypatch.setattr(TTSClient, "_build_client", lambda self: object())
+    cfg = TTSConfig(
+        provider=StepFunProvider(),
+        api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="alloy",
     )
-    return StepFunTTSClient(config=cfg, base_backoff=0.001, max_backoff=0.005, **kw)
+    return TTSClient(config=cfg, base_backoff=0.001, max_backoff=0.005, **kw)
 
 
 def test_retries_then_succeeds(monkeypatch, tmp_path):

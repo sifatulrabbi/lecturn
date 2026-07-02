@@ -34,17 +34,20 @@ from rich.progress import (
 
 from textbook_audiobook import assembler, chunker, cleaner
 from textbook_audiobook.assembler import AssemblyResult
-from textbook_audiobook.config import StepFunConfig, estimate_cost
+from textbook_audiobook.config import TTSConfig
 from textbook_audiobook.loaders import load_document
 from textbook_audiobook.models import Chunk, Document
-from textbook_audiobook.tts import StepFunTTSClient
+from textbook_audiobook.providers.base import Provider
+from textbook_audiobook.tts import TTSClient
 
 # Sensible default for the synth stage. The library default is 1 (sequential);
 # the CLI raises it. Concurrency above the account's per-model limit only trips
-# rate limits, so callers should keep it at/under that (StepFun: 5).
+# rate limits, so callers should keep it at/under the provider's guidance
+# (``provider.concurrency_limit``). These module constants are library-level
+# fallbacks; the CLI sources the effective values from the selected provider.
 DEFAULT_CONCURRENCY: int = 1
 MAX_USEFUL_CONCURRENCY: int = 5
-# Requests-per-minute ceiling honoured by the throttle (StepFun per-model: 10).
+# Requests-per-minute ceiling honoured by the throttle (library fallback).
 DEFAULT_RPM: int = 10
 
 
@@ -86,16 +89,18 @@ class _RateLimiter:
             time.sleep(max(wait, 0.0))
 
 
-def _plan(document: Document, max_chars: int) -> tuple[Document, list[Chunk]]:
+def _plan(
+    document: Document, max_chars: int, hard_limit: int | None = None
+) -> tuple[Document, list[Chunk]]:
     cleaned = cleaner.clean_document(document)
-    chunks = chunker.chunk_document(cleaned, max_chars=max_chars)
+    chunks = chunker.chunk_document(cleaned, max_chars=max_chars, hard_limit=hard_limit)
     return cleaned, chunks
 
 
 def run_pipeline(
     input_path: Path,
     output_dir: Path,
-    config: StepFunConfig,
+    config: TTSConfig,
     *,
     title: str | None = None,
     author: str | None = None,
@@ -113,7 +118,7 @@ def run_pipeline(
     console = console or Console()
 
     document = load_document(input_path, title=title, author=author)
-    cleaned, chunks = _plan(document, max_chars)
+    cleaned, chunks = _plan(document, max_chars, config.hard_char_limit)
 
     if not chunks:
         raise RuntimeError(
@@ -123,7 +128,7 @@ def run_pipeline(
     cache_dir = cache_dir or (output_dir / ".audiobook_cache" / cleaned.slug)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    client = StepFunTTSClient(config=config, fallback_model=fallback_model)
+    client = TTSClient(config=config, fallback_model=fallback_model)
     chunk_files = _synthesize_all(
         chunks, client, cache_dir, config,
         resume=resume, concurrency=concurrency, rpm=rpm, console=console,
@@ -145,7 +150,9 @@ def run_pipeline(
     )
 
     # Cost reflects the model actually used (may be the fallback).
-    estimated = estimate_cost(client.stats.characters, client.active_model)
+    estimated = config.provider.estimate_cost(
+        client.stats.characters, client.active_model
+    )
     return PipelineResult(
         document=cleaned,
         chunks=chunks,
@@ -154,27 +161,30 @@ def run_pipeline(
     )
 
 
-def _chunk_fingerprint(config: StepFunConfig, text: str) -> str:
-    """Short hash identifying a cached chunk by narrator + content.
+def _chunk_fingerprint(config: TTSConfig, text: str) -> str:
+    """Short hash identifying a cached chunk by provider + narrator + content.
 
-    Deliberately keyed on the ``voice``, response ``format``, and chunk text —
-    NOT the model. The model is a quality/cost tier, and a single book can
-    legitimately span models (e.g. the automatic premium->economy fallback on a
-    quota outage), so switching ``--model`` must not invalidate the cache. Use
-    ``--no-resume`` to force a full regeneration. Changing the voice or the source
-    text (including via ``--max-chars``) does change the fingerprint, so that
-    stale audio is never silently reused.
+    Deliberately keyed on the ``provider``, ``voice``, response ``format``, and
+    chunk text — NOT the model. The model is a quality/cost tier, and a single
+    book can legitimately span models (e.g. the automatic premium->economy
+    fallback on a quota outage), so switching ``--model`` must not invalidate the
+    cache. The provider IS in the key: a voice ID like ``alloy`` can exist under
+    more than one provider yet produce different audio, so switching providers
+    must not silently reuse another provider's cache. Use ``--no-resume`` to
+    force a full regeneration. Changing the provider, voice, or source text
+    (including via ``--max-chars``) changes the fingerprint, so stale audio is
+    never silently reused.
     """
 
     h = hashlib.sha1()
-    for part in (config.voice, config.response_format):
+    for part in (config.provider.name, config.voice, config.response_format):
         h.update(part.encode("utf-8"))
         h.update(b"\x00")
     h.update(text.encode("utf-8"))
     return h.hexdigest()[:12]
 
 
-def _chunk_cache_path(cache_dir: Path, chunk: Chunk, config: StepFunConfig) -> Path:
+def _chunk_cache_path(cache_dir: Path, chunk: Chunk, config: TTSConfig) -> Path:
     fp = _chunk_fingerprint(config, chunk.text)
     return cache_dir / f"chunk_{chunk.index:05d}_{fp}.mp3"
 
@@ -226,9 +236,9 @@ def _make_progress(console: Console) -> Progress:
 
 def _synthesize_all(
     chunks: list[Chunk],
-    client: StepFunTTSClient,
+    client: TTSClient,
     cache_dir: Path,
-    config: StepFunConfig,
+    config: TTSConfig,
     *,
     resume: bool,
     concurrency: int = DEFAULT_CONCURRENCY,
@@ -284,7 +294,7 @@ def _synthesize_all(
 def _synthesize_concurrent(
     todo: list[tuple[Chunk, Path]],
     chunk_files: dict[int, Path],
-    client: StepFunTTSClient,
+    client: TTSClient,
     limiter: _RateLimiter,
     progress: Progress,
     task,
@@ -320,6 +330,7 @@ def _synthesize_concurrent(
 def plan_only(
     input_path: Path,
     *,
+    provider: Provider,
     title: str | None,
     author: str | None,
     max_chars: int,
@@ -328,6 +339,6 @@ def plan_only(
     """Load + clean + chunk without calling the API (for --dry-run/estimate)."""
 
     document = load_document(input_path, title=title, author=author)
-    cleaned, chunks = _plan(document, max_chars)
+    cleaned, chunks = _plan(document, max_chars, provider.hard_char_limit)
     total_chars = sum(c.char_count for c in chunks)
-    return cleaned, chunks, estimate_cost(total_chars, model)
+    return cleaned, chunks, provider.estimate_cost(total_chars, model)

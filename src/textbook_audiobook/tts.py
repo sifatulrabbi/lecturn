@@ -1,9 +1,16 @@
-"""StepFun TTS client.
+"""TTS client for OpenAI-compatible providers.
 
-Uses the OpenAI Python SDK pointed at StepFun's OpenAI-compatible base URL
-(``https://api.stepfun.ai/v1``). Calls ``POST /v1/audio/speech`` once per chunk
-and writes the complete MP3 response to disk. No streaming — each call returns a
-full audio file (see PLAN.md "Response Behaviour").
+Uses the OpenAI Python SDK pointed at the selected provider's base URL (StepFun,
+OpenRouter, …). Calls ``POST /v1/audio/speech`` once per chunk and writes the
+complete MP3 response to disk. No streaming — each call returns a full audio
+file (see PLAN.md "Response Behaviour").
+
+The transport is provider-agnostic: every supported provider is
+OpenAI-SDK-compatible, so this one client drives all of them. Provider-specific
+behaviour is delegated to the :class:`~.providers.base.Provider` carried by the
+:class:`~.config.TTSConfig` — the per-request character cap
+(``config.hard_char_limit``) and the wording of error advice
+(``provider.explain``).
 
 Handles transient failures with exponential backoff, honouring ``Retry-After``
 on rate-limit (429) responses.
@@ -17,8 +24,13 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from textbook_audiobook.config import HARD_CHAR_LIMIT, StepFunConfig
+from textbook_audiobook.config import TTSConfig
 from textbook_audiobook.models import Chunk
+from textbook_audiobook.providers.base import (
+    is_quota_error,
+    is_voice_error,
+    retry_after,
+)
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -65,13 +77,13 @@ class SynthesisStats:
 
 
 @dataclass
-class StepFunTTSClient:
-    config: StepFunConfig
+class TTSClient:
+    config: TTSConfig
     max_retries: int = 5
     base_backoff: float = 1.0
     max_backoff: float = 60.0
     # If the primary model fails with an entitlement/model error, automatically
-    # retry the whole document with this economy model. Set to None to disable.
+    # retry the whole document with this model. Set to None to disable.
     fallback_model: str | None = None
     stats: SynthesisStats = field(default_factory=SynthesisStats)
     _client: object | None = field(default=None, init=False, repr=False)
@@ -106,10 +118,11 @@ class StepFunTTSClient:
     def synthesize_chunk(self, chunk: Chunk, out_path: Path) -> Path:
         """Synthesize a single chunk to ``out_path``. Returns the written path."""
 
-        if chunk.char_count > HARD_CHAR_LIMIT:
+        limit = self.config.hard_char_limit
+        if chunk.char_count > limit:
             raise TTSError(
                 f"Chunk {chunk.index} has {chunk.char_count} chars, exceeding "
-                f"StepFun's hard limit of {HARD_CHAR_LIMIT}."
+                f"{self.config.provider.label}'s hard limit of {limit}."
             )
         return self.synthesize_text(chunk.text, out_path)
 
@@ -142,9 +155,9 @@ class StepFunTTSClient:
                     self.stats.failures += 1
                 raise TTSError(self._explain(exc)) from (exc.__cause__ or exc)
 
-        # Fall back to the economy model and retry the whole document from here.
-        # Under concurrency, several threads may hit the dead primary at once;
-        # flipping to the same fallback model repeatedly is idempotent.
+        # Fall back to the configured fallback model and retry the whole document
+        # from here. Under concurrency, several threads may hit the dead primary
+        # at once; flipping to the same fallback model repeatedly is idempotent.
         with self._lock:
             self.stats.fallbacks += 1
             self._active_model = self.fallback_model  # type: ignore[assignment]
@@ -201,37 +214,10 @@ class StepFunTTSClient:
             f"attempt{plural}: {last_exc}"
         ) from last_exc
 
-    @staticmethod
-    def _explain(exc: "_FatalError") -> str:
-        """Turn a fatal error into an actionable message."""
+    def _explain(self, exc: "_FatalError") -> str:
+        """Turn a fatal error into an actionable, provider-specific message."""
 
-        if exc.category == "quota":
-            return (
-                f"StepFun rejected the request: {exc} "
-                "Your account has no remaining quota/credit for this model. "
-                "Add credit or switch plans at https://platform.stepfun.ai, or "
-                "try the economy model with --model step-tts-2."
-            )
-        if exc.category == "auth":
-            return (
-                f"StepFun authentication failed: {exc} "
-                "Check that STEPFUN_API_KEY is set to a valid key."
-            )
-        if exc.category == "voice":
-            return (
-                f"StepFun rejected the voice: {exc} "
-                "This voice ID may not be enabled for your account (access is "
-                "per-account). Run `list-voices` and try another — the "
-                "English-keyed voices (e.g. 'lively-girl', 'elegantgentle-female') "
-                "are the most widely available. Note: OpenAI names like 'alloy' "
-                "are not valid StepFun voices."
-            )
-        if exc.category == "model":
-            return (
-                f"StepFun rejected the model: {exc} "
-                "Verify the --model name (e.g. stepaudio-2.5-tts or step-tts-2)."
-            )
-        return f"StepFun request failed: {exc}"
+        return self.config.provider.explain(exc.category, exc)
 
     def _request_audio(self, text: str, model: str) -> bytes:
         """Make one API call and return the complete audio payload as bytes."""
@@ -259,14 +245,14 @@ class StepFunTTSClient:
                 response_format=self.config.response_format,
             )
         except RateLimitError as exc:
-            raise _RetryableError(str(exc), retry_after=_retry_after(exc)) from exc
+            raise _RetryableError(str(exc), retry_after=retry_after(exc)) from exc
         except (APITimeoutError, APIConnectionError, InternalServerError) as exc:
             raise _RetryableError(str(exc)) from exc
         except AuthenticationError as exc:
             # Wrong/missing key — a model fallback cannot fix this.
             raise _FatalError(str(exc), category="auth", fallback_eligible=False) from exc
         except (NotFoundError, BadRequestError) as exc:
-            if _is_voice_error(exc):
+            if is_voice_error(exc):
                 # Bad voice ID — swapping the model can't fix it.
                 raise _FatalError(
                     str(exc), category="voice", fallback_eligible=False
@@ -275,8 +261,8 @@ class StepFunTTSClient:
             raise _FatalError(str(exc), category="model", fallback_eligible=True) from exc
         except (PermissionDeniedError, APIStatusError) as exc:
             # Quota (402), entitlement (403), and other status errors. These may
-            # be model-specific, so a fallback to the economy model is worth a try.
-            category = "quota" if _is_quota_error(exc) else "model"
+            # be model-specific, so a fallback to another model is worth a try.
+            category = "quota" if is_quota_error(exc) else "model"
             raise _FatalError(str(exc), category=category, fallback_eligible=True) from exc
 
         # The binary response exposes the full payload; no streaming assembly.
@@ -284,20 +270,10 @@ class StepFunTTSClient:
         if content is None and hasattr(response, "read"):
             content = response.read()
         if not content:
-            raise TTSError("StepFun returned an empty audio payload.")
+            raise TTSError(
+                f"{self.config.provider.label} returned an empty audio payload."
+            )
         return content
-
-    # -- convenience ------------------------------------------------------
-
-    def probe_voices(self) -> list[str] | None:
-        """Best-effort attempt to list voices from the API.
-
-        StepFun's OpenAI-compatible surface does not currently expose a voices
-        endpoint in a stable way, so this returns ``None`` when unavailable and
-        callers fall back to the static catalogue.
-        """
-
-        return None
 
 
 class _RetryableError(Exception):
@@ -311,7 +287,7 @@ class _RetryableError(Exception):
 class _FatalError(Exception):
     """Internal marker for permanent errors that retrying cannot fix.
 
-    ``fallback_eligible`` signals whether switching to the economy model might
+    ``fallback_eligible`` signals whether switching to the fallback model might
     succeed (e.g. quota/entitlement scoped to a specific model) versus errors a
     model swap can never resolve (e.g. a bad API key).
     """
@@ -322,38 +298,3 @@ class _FatalError(Exception):
         super().__init__(message)
         self.category = category
         self.fallback_eligible = fallback_eligible
-
-
-def _is_quota_error(exc: Exception) -> bool:
-    """Heuristically detect a quota/billing rejection (commonly HTTP 402)."""
-
-    status = getattr(exc, "status_code", None)
-    if status == 402:
-        return True
-    text = str(exc).lower()
-    return "quota" in text or "billing" in text or "insufficient" in text
-
-
-def _is_voice_error(exc: Exception) -> bool:
-    """Detect a rejected/invalid voice ID (StepFun type 'voice_id_invalid')."""
-
-    text = str(exc).lower()
-    return "voice_id" in text or "voice" in text
-
-
-def _retry_after(exc: Exception) -> float | None:
-    """Extract a Retry-After hint (seconds) from an OpenAI error, if present."""
-
-    response = getattr(exc, "response", None)
-    if response is None:
-        return None
-    headers = getattr(response, "headers", None)
-    if not headers:
-        return None
-    value = headers.get("retry-after") or headers.get("Retry-After")
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None

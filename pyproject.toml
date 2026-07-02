@@ -1,12 +1,12 @@
 [project]
 name = "textbook-audiobook"
 version = "0.1.0"
-description = "Convert textbooks (PDF/EPUB/TXT/MD) into narrated audiobooks using StepFun's TTS API."
+description = "Convert textbooks (PDF/EPUB/TXT/MD) into narrated audiobooks via a pluggable TTS provider (StepFun, OpenRouter)."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "textbook-audiobook contributors" }]
-keywords = ["audiobook", "tts", "stepfun", "pdf", "epub"]
+keywords = ["audiobook", "tts", "stepfun", "openrouter", "pdf", "epub"]
 
 dependencies = [
     "openai>=1.40",

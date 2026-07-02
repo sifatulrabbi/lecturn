@@ -22,9 +22,14 @@ encode/decode real MP3s.
 
 ```
 src/textbook_audiobook/
-├── cli.py            # Typer CLI: convert, list-voices, list-models
+├── cli.py            # Typer CLI: convert, list-providers, list-voices, list-models
 ├── pipeline.py       # Orchestration: load → clean → chunk → synthesize → assemble
 │                     #   + bounded concurrency, RPM throttle, fingerprinted resume cache
+├── providers/        # TTS provider abstraction (see "Providers" below)
+│   ├── __init__.py   # registry: get_provider(), available_providers()
+│   ├── base.py       # Provider ABC, ModelInfo, shared error heuristics, key resolution
+│   ├── stepfun.py    # StepFunProvider: catalogue, pricing, advice, char cap 1000
+│   └── openrouter.py # OpenRouterProvider: curated catalogue, char cap 2000
 ├── loaders/
 │   ├── __init__.py   # dispatch by file extension
 │   ├── base.py       # LoaderError + Loader protocol
@@ -33,11 +38,11 @@ src/textbook_audiobook/
 │   ├── markdown_loader.py# #/## headings → chapters
 │   └── text_loader.py    # `---` delimiter → chapters
 ├── cleaner.py        # strip page numbers / running headers / URLs; fix hyphenation
-├── chunker.py        # ≤1000-char sentence-boundary chunking; never crosses chapters
-├── tts.py            # StepFun client (OpenAI SDK): retries, error tiering, fallback,
-│                     #   atomic writes, thread-safe stats
+├── chunker.py        # ≤ provider-cap sentence-boundary chunking; never crosses chapters
+├── tts.py            # Generic TTSClient (OpenAI SDK): retries, error tiering, fallback,
+│                     #   atomic writes, thread-safe stats — driven by any Provider
 ├── assembler.py      # pydub concat (single / per-chapter) + mutagen ID3 tags
-├── config.py         # constants, model pricing, voice catalogue, env-key resolution
+├── config.py         # TTSConfig (provider + resolved connection fields) + key resolution
 ├── models.py         # Document / Chapter / Chunk dataclasses + slugify
 └── __main__.py       # `python -m textbook_audiobook`
 
@@ -59,10 +64,50 @@ PLAN.md               # original design spec
    pieces on sentence boundaries; never cross chapter boundaries. Oversized
    sentences fall back to clause → word → hard-cut splitting.
 4. **Synthesize** (`tts.py` via `pipeline.py`) — one `POST /v1/audio/speech` per
-   chunk, full MP3 written to disk atomically. Bounded concurrency + RPM
-   throttle. Per-chunk cache enables resume.
+   chunk against the selected provider, full MP3 written to disk atomically.
+   Bounded concurrency + RPM throttle. Per-chunk cache enables resume.
 5. **Assemble** (`assembler.py`) — pydub/ffmpeg concatenation into a single file
    or per-chapter files; mutagen writes ID3v2 tags.
+
+---
+
+## Providers
+
+`lecturn` is multi-provider. A `Provider`
+(`providers/base.py`) captures everything that differs between TTS services:
+base URL, API-key env vars, the model/voice catalogues (with pricing), the
+per-request character cap, concurrency/RPM guidance, and the wording of error
+advice (`Provider.explain`). Concrete providers (`stepfun.py`, `openrouter.py`)
+are registered as singletons in `providers/__init__.py`; `--provider <name>`
+resolves through `get_provider()`.
+
+The **transport is provider-agnostic**: every supported provider is
+OpenAI-SDK-compatible (`client.audio.speech.create(...)` returning a full audio
+body), so the single generic `TTSClient` in `tts.py` drives all of them. The
+`TTSConfig` (`config.py`) carries the chosen provider plus the resolved
+connection fields; the client delegates the per-request char cap
+(`config.hard_char_limit`) and error advice (`provider.explain`) to it. Error
+*classification* (`is_quota_error` / `is_voice_error` / `retry_after` in
+`base.py`) is shared because the OpenAI SDK exception taxonomy is the same for
+all providers.
+
+**To add a provider:** implement a `Provider` subclass and add an instance to
+`_PROVIDERS`. If it is OpenAI-SDK-compatible, no client changes are needed. If it
+is *not*, that is the one place a bespoke transport would be introduced (the
+`TTSClient._build_client` / `_request_audio` seam) — everything else (chunking,
+cache, assembly, CLI) stays the same.
+
+Provider-specific facts worth knowing:
+
+- **StepFun** — char cap 1000; voices are shared across its two models, so the
+  premium→economy fallback (`step-tts-2`) is on by default. Voice access is
+  per-account.
+- **OpenRouter** — char cap 2000; namespaced model IDs (`openai/gpt-4o-mini-tts`,
+  …). **Voices are model-specific**, so automatic fallback is *off* by default (a
+  silent model swap would break the voice). Pricing is per-token, so its catalogue
+  `price_per_10k_chars` values are best-effort approximations for the estimate
+  only. The live list is free to confirm:
+  `GET /api/v1/models?output_modalities=speech`.
 
 ---
 
@@ -75,10 +120,13 @@ uv run pytest tests/test_pipeline.py -k resume    # a subset
 ```
 
 The suite is **network-free and needs no API key** — this is a hard invariant.
-The StepFun transport (`StepFunTTSClient._request_audio`) is stubbed to return
-**real ffmpeg-encoded MP3 bytes** (see `tests/conftest.py`), so everything except
-the actual HTTP call runs for real: load → clean → chunk → synthesize (stubbed)
-→ assemble (pydub/ffmpeg) → ID3 tagging.
+The transport (`TTSClient._build_client` / `TTSClient._request_audio`) is stubbed
+to return **real ffmpeg-encoded MP3 bytes** (see `tests/test_pipeline.py`'s
+`stub_network` fixture + `tests/conftest.py`), so everything except the actual
+HTTP call runs for real: load → clean → chunk → synthesize (stubbed) → assemble
+(pydub/ffmpeg) → ID3 tagging. `tests/test_providers.py` covers the registry,
+catalogues, key resolution, and cost/advice per provider — all with monkeypatched
+env, no live calls.
 
 Coverage highlights:
 
@@ -101,10 +149,13 @@ Coverage highlights:
 
 ## Key design decisions & invariants
 
-- **StepFun via the OpenAI SDK** pointed at `https://api.stepfun.ai/v1`. No
-  streaming — each chunk is one full-file synth call.
-- **1000-char hard cap** per request (`config.HARD_CHAR_LIMIT`). The chunker
-  guarantees no chunk exceeds it; `--max-chars` can only lower it.
+- **OpenAI-SDK-compatible providers** (StepFun `…/v1`, OpenRouter
+  `…/api/v1`, …) driven by one generic `TTSClient`. No streaming — each chunk is
+  one full-file synth call.
+- **Per-provider hard char cap** (`provider.hard_char_limit`: StepFun 1000,
+  OpenRouter 2000). The chunker guarantees no chunk exceeds the effective cap;
+  `--max-chars` defaults to it and can only lower it (the CLI rejects a larger
+  value, and `chunk_document(..., hard_limit=…)` enforces it defensively).
 - **Synthesis defaults to sequential** at the library level
   (`pipeline.DEFAULT_CONCURRENCY = 1`); the CLI raises it to 3. Concurrency is
   bounded and paired with an RPM throttle so it can't exceed account rate limits.
@@ -112,10 +163,12 @@ Coverage highlights:
 - **Atomic chunk writes** (`tts._atomic_write_bytes`: temp + fsync + `os.replace`)
   so an interrupt never leaves a partial cache file.
 - **Fingerprinted resume cache** — cache filenames embed a hash of
-  voice+response_format+text (deliberately **not** the model, so a book can span
-  models — e.g. the premium→economy fallback — without invalidating the cache).
-  A voice or text change invalidates stale audio; `--no-resume` forces a full
-  regenerate. Files are validated as real MP3s before reuse.
+  provider+voice+response_format+text (deliberately **not** the model, so a book
+  can span models — e.g. the premium→economy fallback — without invalidating the
+  cache). Provider **is** in the key: a voice ID like `alloy` could exist under
+  more than one provider yet produce different audio. A provider, voice, or text
+  change invalidates stale audio; `--no-resume` forces a full regenerate. Files
+  are validated as real MP3s before reuse.
 - **Tiered error handling** in `tts.py`:
   - `429` / timeout / `5xx` → retry with exponential backoff (honours
     `Retry-After`).
@@ -123,7 +176,7 @@ Coverage highlights:
     (auto-retry once on `--fallback-model`).
   - bad voice → fail fast, **not** fallback-eligible (a model swap can't fix it).
   - auth (`401`) → fail fast, never falls back.
-- **`StepFunTTSClient` is thread-safe** — a lock guards `stats` and the
+- **`TTSClient` is thread-safe** — a lock guards `stats` and the
   `_active_model` fallback flip so one client can drive concurrent workers.
 
 ### StepFun account gotchas (learned the hard way)

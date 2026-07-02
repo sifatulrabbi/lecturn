@@ -13,8 +13,9 @@ usage after this, see [USAGE.md](USAGE.md).
   - macOS: `brew install ffmpeg`
   - Debian/Ubuntu: `sudo apt-get install ffmpeg`
   - Windows: `winget install Gyan.FFmpeg` (or `choco install ffmpeg`)
-- A **StepFun API key** (only needed for real synthesis, not for `--dry-run` /
-  `list-*`)
+- An **API key for your chosen provider** — StepFun (`STEPFUN_API_KEY`) or
+  OpenRouter (`OPENROUTER_API_KEY`). Only needed for real synthesis, not for
+  `--dry-run` / `list-providers` / `list-*`.
 
 Check ffmpeg is available:
 
@@ -64,37 +65,43 @@ For a dev setup that includes test dependencies, see [DEV.md](DEV.md).
 
 ## Configure credentials
 
-The key is read from the environment — never hard-code or commit it.
+The key is read from the environment — never hard-code or commit it. Set the
+variable(s) for whichever provider(s) you use:
 
 ```bash
-export STEPFUN_API_KEY="sk-..."
+export STEPFUN_API_KEY="sk-..."        # for --provider stepfun
+export OPENROUTER_API_KEY="sk-or-..."  # for --provider openrouter
 ```
 
-Add that line to your shell profile (`~/.zshrc`, `~/.bashrc`) to persist it.
+Add the relevant line to your shell profile (`~/.zshrc`, `~/.bashrc`) to persist it.
 
 Accepted variables:
 
 | Variable | Purpose |
 | --- | --- |
-| `STEPFUN_API_KEY` | Primary key name (checked first). |
-| `STEPFUN_STEP_PLAN_API_KEY` | Fallback key name if the above is unset. |
-| `STEPFUN_BASE_URL` | Optional API base URL override (default `https://api.stepfun.ai/v1`). |
+| `STEPFUN_API_KEY` | StepFun primary key name (checked first). |
+| `STEPFUN_STEP_PLAN_API_KEY` | StepFun fallback key name if the above is unset. |
+| `STEPFUN_BASE_URL` | Optional StepFun base URL override (default `https://api.stepfun.ai/v1`). |
+| `OPENROUTER_API_KEY` | OpenRouter key. |
+| `OPENROUTER_BASE_URL` | Optional OpenRouter base URL override (default `https://openrouter.ai/api/v1`). |
 
-> `--dry-run`, `lecturn list-models`, and `lecturn list-voices` work **without**
-> a key — handy for verifying the install before adding credentials.
+> `--dry-run`, `lecturn list-providers`, `lecturn list-models`, and
+> `lecturn list-voices` work **without** a key — handy for verifying the install
+> before adding credentials.
 
 ---
 
 ## Verify the install
 
 ```bash
-lecturn --version                 # prints: lecturn <version>
-lecturn list-models               # no API call
-lecturn list-voices               # no API call
+lecturn --version                        # prints: lecturn <version>
+lecturn list-providers                   # no API call
+lecturn list-models --provider stepfun   # no API call
+lecturn list-voices --provider stepfun   # no API call
 
 # End-to-end plan without spending anything (needs no key):
 echo "# Test\n\nHello world. This is a test." > /tmp/test.md
-lecturn convert /tmp/test.md --dry-run
+lecturn convert /tmp/test.md --provider stepfun --dry-run
 ```
 
 A successful `--dry-run` prints a conversion plan (chapters, chunks, characters,

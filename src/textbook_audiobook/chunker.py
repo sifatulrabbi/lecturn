@@ -1,7 +1,7 @@
 """Chunking engine.
 
-Splits cleaned text into TTS request units that satisfy StepFun's hard cap of
-1000 characters per request. Guarantees:
+Splits cleaned text into TTS request units that satisfy the provider's hard cap
+per request (StepFun 1000, OpenRouter 2000, …). Guarantees:
 
   * Every emitted chunk is at most ``max_chars`` characters long.
   * Chunks never cross chapter boundaries — each chunk belongs to exactly one
@@ -11,6 +11,9 @@ Splits cleaned text into TTS request units that satisfy StepFun's hard cap of
     back to sub-sentence splitting (clause boundaries, then words, then a hard
     character cut as a last resort).
 
+The per-request ceiling is provider-specific, so callers pass ``hard_limit`` to
+:func:`chunk_document`; the chunker itself only knows ``max_chars``.
+
 The sentence splitter is a dependency-free heuristic tuned to avoid breaking on
 common abbreviations, decimals, and initials.
 """
@@ -19,8 +22,12 @@ from __future__ import annotations
 
 import re
 
-from textbook_audiobook.config import HARD_CHAR_LIMIT
 from textbook_audiobook.models import Chapter, Chunk, Document
+
+# Default per-request character budget when a caller doesn't specify one. The
+# effective ceiling is provider-specific (see ``providers.*.hard_char_limit``);
+# pass ``hard_limit`` to :func:`chunk_document` to enforce it.
+DEFAULT_MAX_CHARS = 1000
 
 # Common abbreviations that end in a period but do not end a sentence.
 _ABBREVIATIONS = {
@@ -196,7 +203,7 @@ def _pack(
     return [c.strip() for c in chunks if c.strip()]
 
 
-def chunk_text(text: str, max_chars: int = HARD_CHAR_LIMIT) -> list[str]:
+def chunk_text(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> list[str]:
     """Split ``text`` into chunks of at most ``max_chars`` on sentence bounds."""
 
     if max_chars <= 0:
@@ -210,17 +217,21 @@ def chunk_text(text: str, max_chars: int = HARD_CHAR_LIMIT) -> list[str]:
 
 
 def chunk_document(
-    document: Document, max_chars: int = HARD_CHAR_LIMIT
+    document: Document,
+    max_chars: int = DEFAULT_MAX_CHARS,
+    *,
+    hard_limit: int | None = None,
 ) -> list[Chunk]:
     """Produce the ordered list of :class:`Chunk` for the whole document.
 
-    Chunks never cross chapter boundaries.
+    Chunks never cross chapter boundaries. When ``hard_limit`` is given (the
+    selected provider's per-request cap), ``max_chars`` may not exceed it.
     """
 
-    if max_chars > HARD_CHAR_LIMIT:
+    if hard_limit is not None and max_chars > hard_limit:
         raise ValueError(
-            f"max_chars={max_chars} exceeds StepFun's hard limit of "
-            f"{HARD_CHAR_LIMIT} characters per request."
+            f"max_chars={max_chars} exceeds the provider hard limit of "
+            f"{hard_limit} characters per request."
         )
 
     chunks: list[Chunk] = []

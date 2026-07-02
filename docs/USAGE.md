@@ -1,21 +1,27 @@
 # lecturn — Usage Guide
 
 `lecturn` converts a textbook (**PDF, EPUB, plain text, or Markdown**) into a
-narrated MP3 audiobook using StepFun's TTS API. This guide covers every command
-and option with extensive, copy-pasteable examples.
+narrated MP3 audiobook using a TTS **provider** (StepFun or OpenRouter). This
+guide covers every command and option with extensive, copy-pasteable examples.
 
 > New here? See [SETUP.md](SETUP.md) to install the `lecturn` command and set
 > your API key first.
 
 Throughout, examples assume the global command `lecturn`. If you're running from
 a source checkout without installing, prefix everything with `uv run` — e.g.
-`uv run lecturn convert book.pdf`.
+`uv run lecturn convert book.pdf --provider stepfun`.
+
+> **`--provider` is required.** Every command that talks to a service — `convert`,
+> `list-models`, `list-voices` — needs `--provider <name>` (`-p` for short).
+> Examples below use `stepfun`; swap in `openrouter` as needed. See
+> [Providers](#providers). `list-providers` and `--dry-run` still need no key.
 
 ---
 
 ## Table of contents
 
 - [Commands at a glance](#commands-at-a-glance)
+- [Providers](#providers)
 - [Quick start](#quick-start)
 - [The `convert` command](#the-convert-command)
 - [Input formats](#input-formats)
@@ -36,13 +42,46 @@ a source checkout without installing, prefix everything with `uv run` — e.g.
 ## Commands at a glance
 
 ```bash
-lecturn convert INPUT_FILE [OPTIONS]   # convert a book into audio (the main command)
-lecturn list-models                    # show available models and pricing
-lecturn list-voices                    # show the StepFun voice catalogue
-lecturn --version                      # print version
-lecturn --help                         # top-level help
-lecturn convert --help                 # full option reference for convert
+lecturn convert INPUT_FILE -p PROVIDER [OPTIONS]   # convert a book into audio (main command)
+lecturn list-providers                             # show the available providers (no key)
+lecturn list-models -p PROVIDER                    # show a provider's models and pricing
+lecturn list-voices -p PROVIDER                    # show a provider's voice catalogue
+lecturn --version                                  # print version
+lecturn --help                                     # top-level help
+lecturn convert --help                             # full option reference for convert
 ```
+
+---
+
+## Providers
+
+A **provider** is the TTS service that turns text into audio. Pick one per run
+with `--provider` / `-p`. There is no default.
+
+| Provider | `--provider` | Default model | Voices | API key env |
+| --- | --- | --- | --- | --- |
+| **StepFun** | `stepfun` | `stepaudio-2.5-tts` | shared across models | `STEPFUN_API_KEY` |
+| **OpenRouter** | `openrouter` | `openai/gpt-4o-mini-tts` | **model-specific** | `OPENROUTER_API_KEY` |
+
+```bash
+lecturn list-providers                         # names, base URLs, default models, key env
+lecturn list-models  --provider openrouter     # a provider's models + (approx.) pricing
+lecturn list-voices  --provider openrouter     # a provider's voices
+```
+
+Key differences that affect how you use them:
+
+- **Char limit.** StepFun caps a request at **1000** characters; OpenRouter at
+  **2000**. `--max-chars` defaults to (and can't exceed) the provider's cap.
+- **Voices.** StepFun voices work across its models. **OpenRouter voices are
+  model-specific** — `list-voices --provider openrouter` shows the *default*
+  model's voices; other models list theirs on their page at
+  `https://openrouter.ai/<model-id>`.
+- **Automatic fallback.** On StepFun it defaults to the economy model
+  (`step-tts-2`). On OpenRouter it's **off** by default (swapping models would
+  break the model-specific voice); opt in with `--fallback-model` if you know a
+  compatible model.
+- **Pricing.** OpenRouter bills per token, so its cost estimates are approximate.
 
 ---
 
@@ -50,14 +89,15 @@ lecturn convert --help                 # full option reference for convert
 
 ```bash
 # 1. See the plan and cost WITHOUT calling the API (free, no key needed):
-lecturn convert mybook.pdf --dry-run
+lecturn convert mybook.pdf --provider stepfun --dry-run
 
 # 2. Convert for real (prompts once to confirm the estimated cost):
-lecturn convert mybook.pdf -o output/
+lecturn convert mybook.pdf --provider stepfun -o output/
 
-# 3. Browse voices and models:
-lecturn list-voices
-lecturn list-models
+# 3. Browse providers, then a provider's voices and models:
+lecturn list-providers
+lecturn list-voices --provider stepfun
+lecturn list-models --provider stepfun
 ```
 
 ---
@@ -73,17 +113,18 @@ lecturn convert INPUT_FILE [OPTIONS]
 
 | Option | Default | Description |
 | --- | --- | --- |
+| `-p`, `--provider` | **required** | TTS provider: `stepfun` or `openrouter`. See [Providers](#providers). |
 | `-o`, `--output` | `output/` | Directory for the output MP3(s). Created if missing. |
-| `-m`, `--model` | `stepaudio-2.5-tts` | TTS model. `stepaudio-2.5-tts` = best quality; `step-tts-2` = economy. |
-| `--voice` | `lively-girl` | StepFun voice ID (not an OpenAI name). See [`list-voices`](#choosing-a-voice). |
-| `--fallback-model` | `step-tts-2` | Model to retry with if the primary model is rejected (quota/entitlement/unknown-model). `none` disables it. |
+| `-m`, `--model` | *provider default* | TTS model. Defaults to the provider's best-quality model. See [`list-models`](#choosing-a-model). |
+| `--voice` | *provider default* | Voice ID. Defaults to the provider's default voice. See [`list-voices`](#choosing-a-voice). |
+| `--fallback-model` | *provider default* | Model to retry with if the primary is rejected (quota/entitlement/unknown-model). StepFun: economy model; OpenRouter: none. `none` disables it. |
 | `--title` | *(from file/metadata)* | Override the book title (used in ID3 tags and output filename). |
 | `--author` | *(from metadata or "Unknown")* | Override the author (used in the artist tag). |
 | `--split-by-chapter` | off | Emit one MP3 per chapter (with track numbers) instead of a single file. |
-| `-c`, `--concurrency` | `3` | Chunks synthesized in parallel. **Faster at the same cost.** Keep ≤ your account's per-model limit (StepFun: 5); `1` = strictly sequential. |
-| `--rpm` | `10` | Throttle: max requests started per minute. Set to your per-model RPM limit (StepFun: 10). `0` disables the throttle. |
-| `--max-chars` | `1000` | Max characters per chunk. StepFun's hard cap is 1000 and cannot be exceeded. |
-| `--base-url` | `https://api.stepfun.ai/v1` | Override the StepFun API base URL. |
+| `-c`, `--concurrency` | `3` | Chunks synthesized in parallel. **Faster at the same cost.** Keep ≤ your provider's per-model limit; `1` = strictly sequential. |
+| `--rpm` | *provider default* | Throttle: max requests started per minute. Defaults to the provider's per-model RPM guidance. `0` disables the throttle. |
+| `--max-chars` | *provider cap* | Max characters per chunk. Defaults to (and cannot exceed) the provider's hard cap (StepFun 1000, OpenRouter 2000). |
+| `--base-url` | *provider default* | Override the provider's API base URL. |
 | `--no-resume` | off | Ignore all cached audio and re-synthesize every chunk from scratch. |
 | `--dry-run` | off | Load + clean + chunk only; print stats and cost estimate. **No API calls.** |
 | `-y`, `--yes` | off | Skip the cost-estimate confirmation prompt. |
@@ -303,16 +344,17 @@ Runs are resumable by design:
   synthesized.
 - Writes are **atomic** (temp file + rename), so an interrupt — Ctrl-C, crash,
   power loss — can never leave a half-written file.
-- Cache filenames embed a **fingerprint** of the **voice + response format +
-  chunk text** — deliberately **not** the model. So:
+- Cache filenames embed a **fingerprint** of the **provider + voice + response
+  format + chunk text** — deliberately **not** the model. So:
   - **Re-running the same command resumes** — already-done chunks are skipped and
     not re-billed.
   - **Switching `--model` reuses the cache.** A book can legitimately span models
     (e.g. the premium→economy fallback on a quota outage), so the model isn't
     part of the key. Use `--no-resume` if you want to regenerate everything.
-  - **Changing the `--voice`, or the source text (including via `--max-chars`),
-    invalidates stale audio** — those chunks are re-synthesized instead of
-    silently reused.
+  - **Changing the `--provider` or `--voice`, or the source text (including via
+    `--max-chars`), invalidates stale audio** — those chunks are re-synthesized
+    instead of silently reused. (Provider is in the key because a voice ID like
+    `alloy` could exist under more than one provider yet sound different.)
 - Cache files are validated as real MP3s on reuse; corrupt/empty ones are
   re-synthesized rather than trusted.
 
@@ -340,10 +382,16 @@ rm -rf output/.audiobook_cache
 
 ## Choosing a voice
 
-StepFun uses its own voice IDs (**not** OpenAI names like `alloy`). Browse them:
+Voices are provider-specific. Browse a provider's set with
+`lecturn list-voices --provider <name>`. On **OpenRouter** voices are also
+*model*-specific — the listing shows the default model's voices; other models
+list theirs at `https://openrouter.ai/<model-id>`.
+
+The rest of this section covers **StepFun**, which uses its own voice IDs
+(**not** OpenAI names like `alloy`):
 
 ```bash
-lecturn list-voices
+lecturn list-voices --provider stepfun
 ```
 
 The default is **`lively-girl`**. A few commonly useful, widely-available voices:
@@ -370,19 +418,34 @@ The default is **`lively-girl`**. A few commonly useful, widely-available voices
 ## Choosing a model
 
 ```bash
-lecturn list-models
+lecturn list-models --provider stepfun
+lecturn list-models --provider openrouter
 ```
+
+**StepFun:**
 
 | Model | Price / 10k chars | Notes |
 | --- | --- | --- |
 | `stepaudio-2.5-tts` | $0.85 | Default. Best audio quality. |
 | `step-tts-2` | $0.40 | Economy. ~2× cheaper. |
 
+**OpenRouter** (curated set; prices are *approximate* per-character estimates —
+OpenRouter bills per token — verify on each model's page):
+
+| Model | ≈ Price / 10k chars | Notes |
+| --- | --- | --- |
+| `openai/gpt-4o-mini-tts` | ~$0.006 | Default. OpenAI voices (alloy, nova, …). |
+| `google/gemini-3.1-flash-tts-preview` | ~$0.010 | Google Gemini voices (preview). |
+| `mistralai/voxtral-mini-tts-2603` | ~$0.016 | Mistral Voxtral. |
+| `hexgrad/kokoro-82m` | ~$0.001 | Cheapest; open-weights; 54 voices. |
+
 **Automatic fallback:** if the primary `--model` is rejected for a
-quota/entitlement/unknown-model reason, `lecturn` automatically retries with
-`--fallback-model` (default `step-tts-2`) and continues on that model. You'll see
-a `Note: fell back from '…' to '…'` message, and the cost estimate reflects the
-model actually used.
+quota/entitlement/unknown-model reason, `lecturn` retries with `--fallback-model`
+and continues on that model. On **StepFun** this defaults to `step-tts-2`. On
+**OpenRouter** it is **off by default** — voices are model-specific, so a silent
+model swap would break the voice; pass `--fallback-model` only with a
+voice-compatible model. When a fallback happens you'll see a `Note: fell back
+from '…' to '…'` message, and the cost estimate reflects the model actually used.
 
 > **Tip:** if your account is out of quota on `stepaudio-2.5-tts`, pass
 > `--model step-tts-2` directly to skip the wasted first attempt on each run.
@@ -407,17 +470,22 @@ All outputs get ID3v2 tags: title (`TIT2`), author/artist (`TPE1`), album
 
 ## Environment variables
 
+Each provider reads its own key/base-URL variables:
+
 | Variable | Purpose |
 | --- | --- |
-| `STEPFUN_API_KEY` | Your StepFun API key (required for real synthesis). |
-| `STEPFUN_STEP_PLAN_API_KEY` | Alternative key name, used if `STEPFUN_API_KEY` is unset. |
-| `STEPFUN_BASE_URL` | Override the API base URL (or use `--base-url`). |
+| `STEPFUN_API_KEY` | StepFun key (required for real StepFun synthesis). |
+| `STEPFUN_STEP_PLAN_API_KEY` | Alternative StepFun key name, used if `STEPFUN_API_KEY` is unset. |
+| `STEPFUN_BASE_URL` | Override the StepFun base URL (or use `--base-url`). |
+| `OPENROUTER_API_KEY` | OpenRouter key (required for real OpenRouter synthesis). |
+| `OPENROUTER_BASE_URL` | Override the OpenRouter base URL (or use `--base-url`). |
 
 ```bash
 export STEPFUN_API_KEY="sk-..."
+export OPENROUTER_API_KEY="sk-or-..."
 ```
 
-`--dry-run`, `list-models`, and `list-voices` need **no** key.
+`--dry-run`, `list-providers`, `list-models`, and `list-voices` need **no** key.
 
 ---
 
@@ -429,7 +497,7 @@ Useful for scripting:
 | --- | --- |
 | `0` | Success (including `--dry-run`, `--version`, `--help`). |
 | `1` | Load/config/pipeline error (bad input file, missing API key, synthesis failed). |
-| `2` | Invalid arguments (`--max-chars` out of range, `--concurrency < 1`, `--rpm < 0`). |
+| `2` | Invalid arguments (missing/unknown `--provider`, `--max-chars` out of range, `--concurrency < 1`, `--rpm < 0`). |
 | `130` | Interrupted with Ctrl-C (chunks done so far are cached; re-run to resume). |
 
 ---

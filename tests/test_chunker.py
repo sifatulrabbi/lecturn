@@ -5,12 +5,12 @@ from __future__ import annotations
 import pytest
 
 from textbook_audiobook.chunker import (
+    DEFAULT_MAX_CHARS as HARD_CHAR_LIMIT,
     chunk_document,
     chunk_text,
     chunks_by_chapter,
     split_sentences,
 )
-from textbook_audiobook.config import HARD_CHAR_LIMIT
 from textbook_audiobook.models import Chapter, Document
 
 
@@ -112,5 +112,8 @@ def test_chunk_document_rejects_over_hard_limit():
         source_path=__import__("pathlib").Path("x.txt"),
         chapters=[Chapter(index=0, title="", text="hi.")],
     )
+    # With an explicit provider hard_limit, max_chars may not exceed it.
     with pytest.raises(ValueError):
-        chunk_document(doc, max_chars=HARD_CHAR_LIMIT + 1)
+        chunk_document(
+            doc, max_chars=HARD_CHAR_LIMIT + 1, hard_limit=HARD_CHAR_LIMIT
+        )
