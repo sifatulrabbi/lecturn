@@ -56,8 +56,12 @@ a live API.
   (`pipeline.DEFAULT_CONCURRENCY = 1`); concurrency is bounded and paired with an
   RPM throttle so it can't exceed account limits. Concurrency changes wall-clock
   time only, never total cost.
-- Chunk writes are atomic; the resume cache is fingerprinted (voice+model+text)
-  and validated. Don't regress to non-atomic writes or size-only cache checks.
+- Chunk writes are atomic; the resume cache is fingerprinted by
+  voice+response_format+text (NOT model — a book can span models via the
+  fallback) and validated by MP3 magic bytes (StepFun MP3s are ID3-prefixed and
+  report mutagen length 0, so don't gate on decoded length). `--no-resume`
+  forces a full regenerate. Don't regress to non-atomic writes, size-only cache
+  checks, or a model-keyed fingerprint.
 - Keep secrets out of code — read the key from the environment.
 
 ## Conventions

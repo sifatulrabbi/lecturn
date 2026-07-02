@@ -84,7 +84,7 @@ lecturn convert INPUT_FILE [OPTIONS]
 | `--rpm` | `10` | Throttle: max requests started per minute. Set to your per-model RPM limit (StepFun: 10). `0` disables the throttle. |
 | `--max-chars` | `1000` | Max characters per chunk. StepFun's hard cap is 1000 and cannot be exceeded. |
 | `--base-url` | `https://api.stepfun.ai/v1` | Override the StepFun API base URL. |
-| `--no-resume` | off | Ignore cached chunk audio and re-synthesize everything. |
+| `--no-resume` | off | Ignore all cached audio and re-synthesize every chunk from scratch. |
 | `--dry-run` | off | Load + clean + chunk only; print stats and cost estimate. **No API calls.** |
 | `-y`, `--yes` | off | Skip the cost-estimate confirmation prompt. |
 
@@ -202,7 +202,7 @@ lecturn convert mybook.pdf --max-chars 600             # smaller chunks (more re
 Smaller chunks = more requests = finer resume granularity, but no cost change
 (cost is per character). You **cannot** exceed 1000 — the API rejects it.
 
-### Force a full re-synthesis
+### Start fresh (ignore the cache)
 
 ```bash
 lecturn convert mybook.pdf --no-resume                 # ignore cache, redo every chunk
@@ -303,12 +303,16 @@ Runs are resumable by design:
   synthesized.
 - Writes are **atomic** (temp file + rename), so an interrupt — Ctrl-C, crash,
   power loss — can never leave a half-written file.
-- Cache filenames embed a **fingerprint** of the voice + model + response format
-  + chunk text. So:
+- Cache filenames embed a **fingerprint** of the **voice + response format +
+  chunk text** — deliberately **not** the model. So:
   - **Re-running the same command resumes** — already-done chunks are skipped and
     not re-billed.
-  - **Changing the voice, model, or source text invalidates stale audio** — those
-    chunks are re-synthesized instead of silently reused.
+  - **Switching `--model` reuses the cache.** A book can legitimately span models
+    (e.g. the premium→economy fallback on a quota outage), so the model isn't
+    part of the key. Use `--no-resume` if you want to regenerate everything.
+  - **Changing the `--voice`, or the source text (including via `--max-chars`),
+    invalidates stale audio** — those chunks are re-synthesized instead of
+    silently reused.
 - Cache files are validated as real MP3s on reuse; corrupt/empty ones are
   re-synthesized rather than trusted.
 

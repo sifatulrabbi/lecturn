@@ -155,17 +155,19 @@ def run_pipeline(
 
 
 def _chunk_fingerprint(config: StepFunConfig, text: str) -> str:
-    """Short hash identifying the exact audio a chunk would produce.
+    """Short hash identifying a cached chunk by narrator + content.
 
-    Covers everything that determines the rendered audio: the voice, the model,
-    the response format, and the chunk text. Embedding it in the cache filename
-    means resume reuses a cached chunk ONLY when it matches the current run —
-    change the voice/model/text and the fingerprint (and filename) changes, so
+    Deliberately keyed on the ``voice``, response ``format``, and chunk text —
+    NOT the model. The model is a quality/cost tier, and a single book can
+    legitimately span models (e.g. the automatic premium->economy fallback on a
+    quota outage), so switching ``--model`` must not invalidate the cache. Use
+    ``--no-resume`` to force a full regeneration. Changing the voice or the source
+    text (including via ``--max-chars``) does change the fingerprint, so that
     stale audio is never silently reused.
     """
 
     h = hashlib.sha1()
-    for part in (config.voice, config.model, config.response_format):
+    for part in (config.voice, config.response_format):
         h.update(part.encode("utf-8"))
         h.update(b"\x00")
     h.update(text.encode("utf-8"))

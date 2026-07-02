@@ -88,8 +88,9 @@ Coverage highlights:
 - **Assembler** — real concat + ID3 readback (single-file and per-chapter tracks).
 - **TTS client** — retry/backoff, error classification, model fallback, atomic
   write leaves no partial file on failure.
-- **Pipeline** — end-to-end; resume (skip cached), `--no-resume`,
-  fingerprint invalidation, corrupt-cache rejection, concurrency is bounded, the
+- **Pipeline** — end-to-end; resume (skip cached), `--no-resume`, fingerprint
+  invalidation on voice change, cache reuse across model switch, corrupt-cache
+  rejection, concurrency is bounded, the
   RPM rate limiter, and the sequential (`concurrency=1`) guarantee.
 - **CLI** — argument validation, dry-run, catalogue commands, version.
 
@@ -111,9 +112,10 @@ Coverage highlights:
 - **Atomic chunk writes** (`tts._atomic_write_bytes`: temp + fsync + `os.replace`)
   so an interrupt never leaves a partial cache file.
 - **Fingerprinted resume cache** — cache filenames embed a hash of
-  voice+model+response_format+text, so resume reuses a chunk only when it matches
-  the current run; changed params invalidate stale audio. Files are validated as
-  real MP3s before reuse.
+  voice+response_format+text (deliberately **not** the model, so a book can span
+  models — e.g. the premium→economy fallback — without invalidating the cache).
+  A voice or text change invalidates stale audio; `--no-resume` forces a full
+  regenerate. Files are validated as real MP3s before reuse.
 - **Tiered error handling** in `tts.py`:
   - `429` / timeout / `5xx` → retry with exponential backoff (honours
     `Retry-After`).

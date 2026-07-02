@@ -99,7 +99,11 @@ def convert(
     ),
     no_resume: bool = typer.Option(
         False, "--no-resume",
-        help="Re-synthesize all chunks even if cached audio exists.",
+        help=(
+            "Ignore any cached audio and re-synthesize every chunk from scratch. "
+            "By default a run resumes from cache; switching --model reuses the "
+            "cache (only a voice or text change invalidates it)."
+        ),
     ),
     concurrency: int = typer.Option(
         3, "--concurrency", "-c",

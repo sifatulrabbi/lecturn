@@ -253,6 +253,26 @@ def test_resume_resynthesizes_when_voice_changes(tmp_path, stub_network):
     assert stub_network["requests"] == n    # every chunk re-synthesized for the new voice
 
 
+def test_resume_reuses_cache_across_model_switch(tmp_path, stub_network):
+    """Switching --model must NOT invalidate the cache (model isn't in the key).
+
+    A book can legitimately span models (e.g. the premium->economy fallback),
+    so resume reuses cached audio regardless of the requested model.
+    """
+
+    src = _write_book(tmp_path)
+    out = tmp_path / "out"
+    premium = StepFunConfig(api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="lively-girl")
+    first = pipeline.run_pipeline(src, out, premium, max_chars=1000)
+    n = len(first.chunks)
+    assert stub_network["requests"] == n
+
+    stub_network["requests"] = 0
+    economy = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
+    pipeline.run_pipeline(src, out, economy, max_chars=1000, resume=True)
+    assert stub_network["requests"] == 0    # same voice+text -> cache reused despite model change
+
+
 def test_is_playable_mp3_accepts_id3_prefixed_audio(tmp_path):
     """Regression: StepFun MP3s start with ID3 and report mutagen length 0.0.
 
