@@ -22,8 +22,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
 
-from textbook_audiobook.config import HARD_CHAR_LIMIT, TTSConfig
+from textbook_audiobook.config import HARD_CHAR_LIMIT, OPENROUTER_MODELS, TTSConfig
 from textbook_audiobook.models import Chunk
+from textbook_audiobook.tokens import count_tokens
+
+# Fraction of a model's token ceiling we allow through, leaving headroom for the
+# fact that we approximate token counts (no public Kokoro tokenizer). For
+# Kokoro's 4096-token cap this rejects above ~3891 tokens.
+_TOKEN_LIMIT_SAFETY: float = 0.95
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -148,6 +154,10 @@ class _BaseTTSClient:
         with self._lock:
             active_model = self._active_model
 
+        # Reject a chunk that would overrun the model's input token limit before
+        # spending a call. No-op for providers without a token cap.
+        self._check_input_limits(text, active_model)
+
         try:
             return self._attempt_with_retries(text, out_path, active_model)
         except _FatalError as exc:
@@ -230,6 +240,14 @@ class _BaseTTSClient:
         """
 
         return f"TTS request failed: {exc}"
+
+    def _check_input_limits(self, text: str, model: str) -> None:
+        """Validate ``text`` against ``model``'s input limits before a request.
+
+        Provider hook: the base does nothing (StepFun imposes no token cap).
+        Providers with a token ceiling (e.g. OpenRouter/Kokoro) override this to
+        reject an over-limit chunk with a clear :class:`TTSError`.
+        """
 
     def _request_audio(self, text: str, model: str) -> bytes:
         """Make one API call and return the complete audio payload as bytes."""
@@ -354,6 +372,29 @@ class OpenRouterTTSClient(_BaseTTSClient):
     provider_label: ClassVar[str] = "OpenRouter"
 
     fallback_model: str | None = None
+
+    def _check_input_limits(self, text: str, model: str) -> None:
+        """Reject a chunk whose token count would overrun the model's cap.
+
+        Kokoro accepts ``max_input_tokens`` (4096) per request. We count tokens
+        with a tiktoken approximation (Kokoro publishes no tokenizer) and reject
+        above a safety margin. NOTE: with ``HARD_CHAR_LIMIT`` (1000) a chunk is
+        at most ~1000 chars ≈ 300 tokens, so this can never fire today — it makes
+        the constraint explicit and future-proofs against a raised char cap or a
+        lower-limit model.
+        """
+
+        info = OPENROUTER_MODELS.get(model)
+        if info is None or info.max_input_tokens is None:
+            return
+        ceiling = int(info.max_input_tokens * _TOKEN_LIMIT_SAFETY)
+        n_tokens = count_tokens(text)
+        if n_tokens > ceiling:
+            raise TTSError(
+                f"Chunk is ~{n_tokens} tokens, over {model}'s safe input limit "
+                f"of {ceiling} (model max {info.max_input_tokens}). "
+                "Lower --max-chars to produce smaller chunks."
+            )
 
     @staticmethod
     def _explain(exc: "_FatalError") -> str:

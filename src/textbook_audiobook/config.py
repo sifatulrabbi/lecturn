@@ -50,6 +50,9 @@ class ModelInfo:
     # USD per 10,000 characters (PLAN.md "Pricing").
     price_per_10k_chars: float
     description: str
+    # Maximum input tokens the model accepts per request, or None if the model
+    # imposes no (relevant) token cap. Enforced by the client's input guard.
+    max_input_tokens: int | None = None
 
 
 # Confirmed models and pricing from PLAN.md.
@@ -136,6 +139,9 @@ OPENROUTER_MODELS: dict[str, ModelInfo] = {
         name="hexgrad/kokoro-82m",
         price_per_10k_chars=0.0062,
         description="Kokoro-82M — lightweight open-weight TTS (via OpenRouter)",
+        # Kokoro accepts up to 4096 input tokens per request. The client enforces
+        # this with a safety margin; StepFun models have no token cap (None).
+        max_input_tokens=4096,
     ),
 }
 

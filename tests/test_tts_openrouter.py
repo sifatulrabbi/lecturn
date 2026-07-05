@@ -10,6 +10,7 @@ default) plus the configured voice and model.
 from __future__ import annotations
 
 from textbook_audiobook import pipeline
+from textbook_audiobook import tts as tts_module
 from textbook_audiobook.config import OpenRouterConfig
 from textbook_audiobook.tts import (
     OpenRouterTTSClient,
@@ -106,6 +107,43 @@ def test_no_fallback_attempted_by_default(monkeypatch, tmp_path):
     assert seen_models == ["hexgrad/kokoro-82m"]   # exactly one model tried
     assert c.stats.fallbacks == 0
     assert "credit" in str(exc.value).lower()
+
+
+# -- input token guard ------------------------------------------------------
+
+
+def test_over_token_limit_raises_before_any_request(monkeypatch, tmp_path):
+    """A chunk over Kokoro's token cap fails fast, before spending a call.
+
+    HARD_CHAR_LIMIT keeps real chunks far under the cap, so we force a large
+    token count to exercise the guard. It must raise a clear TTSError and never
+    reach the network.
+    """
+
+    c = _client(monkeypatch)
+
+    def must_not_run(text, model):  # pragma: no cover - asserts it's unreachable
+        raise AssertionError("guard must reject the chunk before any request")
+
+    c._request_audio = must_not_run
+    # Report a token count above Kokoro's 4096 cap (well past the safety margin).
+    monkeypatch.setattr(tts_module, "count_tokens", lambda text: 5000)
+
+    with pytest.raises(TTSError) as exc:
+        c.synthesize_text("does not matter", tmp_path / "a.mp3")
+    msg = str(exc.value).lower()
+    assert "token" in msg
+    assert "hexgrad/kokoro-82m" in str(exc.value)
+
+
+def test_within_token_limit_synthesizes(monkeypatch, tmp_path, mp3_bytes):
+    """A normal-sized chunk passes the guard (heuristic count, no download)."""
+
+    c = _client(monkeypatch)
+    c._request_audio = lambda text, model: mp3_bytes
+    # Default (offline) heuristic count for a short string is tiny — guard inert.
+    out = c.synthesize_text("a short chunk of text", tmp_path / "a.mp3")
+    assert pipeline._is_playable_mp3(out)
 
 
 def test_voice_error_message_points_at_list_voices(monkeypatch, tmp_path):
