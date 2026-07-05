@@ -35,3 +35,8 @@ output/
 
 # AI planning artifacts
 .planning/
+
+.tmp/
+.local/
+.cache/
+output/
