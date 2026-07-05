@@ -37,7 +37,9 @@ Requires **ffmpeg** on `PATH` (used by pydub, and by the audio-path tests).
 The test suite must stay **network-free and key-free**. The StepFun transport is
 stubbed to return real ffmpeg-encoded MP3 bytes (`tests/conftest.py`). Any new
 network behaviour must be covered by a stubbed test — never make tests depend on
-a live API.
+a live API. Note: `tokens.count_tokens` downloads a tiktoken encoding on first
+use, so an autouse `conftest.py` fixture forces its offline heuristic; tests that
+exercise the real counting path inject a fake encoding instead of downloading.
 
 ## StepFun gotchas (non-obvious, cost real time to rediscover)
 
@@ -58,6 +60,20 @@ a live API.
 - Kokoro voice IDs are namespaced by language/gender prefix (`af_`, `am_`,
   `bf_`, `bm_`, …); quality varies a lot — `af_heart` (A grade, the default)
   and `af_bella` (A-) are the best English voices.
+- Kokoro caps input at **4096 tokens** per request; enforced by
+  `OpenRouterTTSClient._check_input_limits` (via `tokens.count_tokens`) — inert
+  under the 1000-char chunk cap, but keep it correct.
+
+## Cross-provider fallback
+
+- On a fallback-eligible failure (quota/unknown-model) the run switches, **once
+  and one-way**, to OpenRouter + `hexgrad/kokoro-82m` (voice `af_heart`) — the
+  target for **both** providers (StepFun's old premium→economy default is
+  retired). `FallbackTTSClient` (in `tts.py`) wraps a primary + a lazily-built
+  fallback; a StepFun-only run needs no `OPENROUTER_API_KEY` until the fallback
+  actually fires, at which point a missing key surfaces the original error plus a
+  skip note. `--fallback-model none` disables it; an OpenRouter primary's default
+  fallback equals its model and is a no-op.
 
 ## Invariants not to break
 
@@ -67,11 +83,13 @@ a live API.
   RPM throttle so it can't exceed account limits. Concurrency changes wall-clock
   time only, never total cost.
 - Chunk writes are atomic; the resume cache is fingerprinted by
-  voice+response_format+text (NOT model — a book can span models via the
-  fallback) and validated by MP3 magic bytes (StepFun MP3s are ID3-prefixed and
-  report mutagen length 0, so don't gate on decoded length). `--no-resume`
-  forces a full regenerate. Don't regress to non-atomic writes, size-only cache
-  checks, or a model-keyed fingerprint.
+  voice+response_format+text (NOT model, NOT provider — a book can span models
+  **and providers** via the fallback), computed from `client.active_config` at
+  dispatch so post-fallback chunks are keyed on the fallback voice, and validated
+  by MP3 magic bytes (StepFun MP3s are ID3-prefixed and report mutagen length 0,
+  so don't gate on decoded length). `--no-resume` forces a full regenerate. Don't
+  regress to non-atomic writes, size-only cache checks, or a model/provider-keyed
+  fingerprint.
 - Keep secrets out of code — read the key from the environment.
 
 ## Conventions
