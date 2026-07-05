@@ -47,8 +47,11 @@ def test_retries_then_succeeds(monkeypatch, tmp_path):
     assert c.stats.requests == 1
 
 
-def test_quota_error_fails_fast_without_fallback(monkeypatch, tmp_path):
-    c = _client(monkeypatch, fallback_model=None)
+def test_quota_error_fails_fast_and_is_fallback_eligible(monkeypatch, tmp_path):
+    # The base client no longer swaps models itself: on a fallback-eligible
+    # fatal error it fails fast, tagging the TTSError so a FallbackTTSClient
+    # wrapper can decide whether to switch providers.
+    c = _client(monkeypatch)
     calls = {"n": 0}
 
     def req(text, model):
@@ -61,29 +64,12 @@ def test_quota_error_fails_fast_without_fallback(monkeypatch, tmp_path):
     # Exactly one attempt — no wasted retries on a permanent error.
     assert calls["n"] == 1
     assert "quota" in str(exc.value).lower()
+    assert exc.value.fallback_eligible is True
     assert c.stats.failures == 1
 
 
-def test_quota_error_triggers_model_fallback(monkeypatch, tmp_path):
-    c = _client(monkeypatch, fallback_model="step-tts-2")
-    seen_models: list[str] = []
-
-    def req(text, model):
-        seen_models.append(model)
-        if model == "stepaudio-2.5-tts":
-            raise _FatalError("quota", category="quota", fallback_eligible=True)
-        return b"FALLBACK_AUDIO"
-
-    c._request_audio = req
-    out = c.synthesize_text("hello", tmp_path / "a.mp3")
-    assert out.read_bytes() == b"FALLBACK_AUDIO"
-    assert seen_models == ["stepaudio-2.5-tts", "step-tts-2"]
-    assert c.stats.fallbacks == 1
-    assert c.active_model == "step-tts-2"
-
-
-def test_auth_error_does_not_fall_back(monkeypatch, tmp_path):
-    c = _client(monkeypatch, fallback_model="step-tts-2")
+def test_auth_error_not_fallback_eligible(monkeypatch, tmp_path):
+    c = _client(monkeypatch)
     calls = {"n": 0}
 
     def req(text, model):
@@ -93,9 +79,9 @@ def test_auth_error_does_not_fall_back(monkeypatch, tmp_path):
     c._request_audio = req
     with pytest.raises(TTSError) as exc:
         c.synthesize_text("hello", tmp_path / "a.mp3")
-    # Auth failures are not retried and never trigger a model swap.
+    # Auth failures are not retried and are never fallback-eligible.
     assert calls["n"] == 1
-    assert c.stats.fallbacks == 0
+    assert exc.value.fallback_eligible is False
     assert "authentication" in str(exc.value).lower() or "key" in str(exc.value).lower()
 
 
@@ -118,8 +104,8 @@ class _FakeStatusError(Exception):
         self.status_code = status_code
 
 
-def test_voice_error_fails_fast_no_fallback(monkeypatch, tmp_path):
-    c = _client(monkeypatch, fallback_model="step-tts-2")
+def test_voice_error_not_fallback_eligible(monkeypatch, tmp_path):
+    c = _client(monkeypatch)
     calls = {"n": 0}
 
     def req(text, model):
@@ -133,9 +119,10 @@ def test_voice_error_fails_fast_no_fallback(monkeypatch, tmp_path):
     c._request_audio = req
     with pytest.raises(TTSError) as exc:
         c.synthesize_text("hello", tmp_path / "a.mp3")
-    # A bad voice can't be fixed by swapping models — one attempt, no fallback.
+    # A bad voice can't be fixed by switching providers — one attempt, not
+    # fallback-eligible.
     assert calls["n"] == 1
-    assert c.stats.fallbacks == 0
+    assert exc.value.fallback_eligible is False
     assert "voice" in str(exc.value).lower()
 
 
