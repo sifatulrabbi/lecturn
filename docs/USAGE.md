@@ -440,6 +440,9 @@ model actually used.
 > Auth (`401`) and bad-voice errors never trigger a fallback (a model swap can't
 > fix them).
 
+Setting `--fallback-model` to the same value as `--model` is treated as no
+fallback (there's nothing to fall back to), exactly like `--fallback-model none`.
+
 ### OpenRouter models
 
 | Model | Price / 10k chars | Notes |
