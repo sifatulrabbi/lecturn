@@ -1,8 +1,9 @@
 # lecturn — Usage Guide
 
 `lecturn` converts a textbook (**PDF, EPUB, plain text, or Markdown**) into a
-narrated MP3 audiobook using StepFun's TTS API. This guide covers every command
-and option with extensive, copy-pasteable examples.
+narrated MP3 audiobook using a TTS provider — **StepFun** (default) or
+**OpenRouter** (Kokoro-82M), selected with `--provider`. This guide covers every
+command and option with extensive, copy-pasteable examples.
 
 > New here? See [SETUP.md](SETUP.md) to install the `lecturn` command and set
 > your API key first.
@@ -37,8 +38,9 @@ a source checkout without installing, prefix everything with `uv run` — e.g.
 
 ```bash
 lecturn convert INPUT_FILE [OPTIONS]   # convert a book into audio (the main command)
-lecturn list-models                    # show available models and pricing
-lecturn list-voices                    # show the StepFun voice catalogue
+lecturn list-models                    # show models and pricing (both providers)
+lecturn list-voices                    # show voice catalogues (both providers)
+lecturn list-models --provider openrouter   # filter a catalogue to one provider
 lecturn --version                      # print version
 lecturn --help                         # top-level help
 lecturn convert --help                 # full option reference for convert
@@ -74,16 +76,17 @@ lecturn convert INPUT_FILE [OPTIONS]
 | Option | Default | Description |
 | --- | --- | --- |
 | `-o`, `--output` | `output/` | Directory for the output MP3(s). Created if missing. |
-| `-m`, `--model` | `stepaudio-2.5-tts` | TTS model. `stepaudio-2.5-tts` = best quality; `step-tts-2` = economy. |
-| `--voice` | `lively-girl` | StepFun voice ID (not an OpenAI name). See [`list-voices`](#choosing-a-voice). |
-| `--fallback-model` | `step-tts-2` | Model to retry with if the primary model is rejected (quota/entitlement/unknown-model). `none` disables it. |
+| `--provider` | `stepfun` | TTS provider: `stepfun` or `openrouter` (Kokoro-82M). Selects the API, key, and the defaults for `--model`/`--voice` below. |
+| `-m`, `--model` | *(per provider)* | TTS model. StepFun: `stepaudio-2.5-tts` (best) / `step-tts-2` (economy). OpenRouter: `hexgrad/kokoro-82m`. |
+| `--voice` | *(per provider)* | Voice ID. StepFun default `lively-girl`; OpenRouter default `af_heart`. See [`list-voices`](#choosing-a-voice). |
+| `--fallback-model` | `step-tts-2` (StepFun) / *none* (OpenRouter) | **StepFun concept.** Model to retry with if the primary model is rejected (quota/entitlement/unknown-model). `none` disables it. OpenRouter has a single model, so it has no fallback. |
 | `--title` | *(from file/metadata)* | Override the book title (used in ID3 tags and output filename). |
 | `--author` | *(from metadata or "Unknown")* | Override the author (used in the artist tag). |
 | `--split-by-chapter` | off | Emit one MP3 per chapter (with track numbers) instead of a single file. |
 | `-c`, `--concurrency` | `3` | Chunks synthesized in parallel. **Faster at the same cost.** Keep ≤ your account's per-model limit (StepFun: 5); `1` = strictly sequential. |
 | `--rpm` | `10` | Throttle: max requests started per minute. Set to your per-model RPM limit (StepFun: 10). `0` disables the throttle. |
-| `--max-chars` | `1000` | Max characters per chunk. StepFun's hard cap is 1000 and cannot be exceeded. |
-| `--base-url` | `https://api.stepfun.ai/v1` | Override the StepFun API base URL. |
+| `--max-chars` | `1000` | Max characters per chunk. StepFun's hard cap is 1000 and cannot be exceeded (applied to both providers). |
+| `--base-url` | *(per provider)* | Override the provider's API base URL (StepFun `https://api.stepfun.ai/v1`, OpenRouter `https://openrouter.ai/api/v1`). |
 | `--no-resume` | off | Ignore all cached audio and re-synthesize every chunk from scratch. |
 | `--dry-run` | off | Load + clean + chunk only; print stats and cost estimate. **No API calls.** |
 | `-y`, `--yes` | off | Skip the cost-estimate confirmation prompt. |
@@ -138,6 +141,28 @@ lecturn convert mybook.pdf
 lecturn convert mybook.epub -o ~/audiobooks/
 lecturn convert mybook.epub --output ./out/clear-thinking/
 ```
+
+### Choose a TTS provider
+
+```bash
+lecturn convert mybook.pdf --provider stepfun           # default (StepFun)
+lecturn convert mybook.pdf --provider openrouter        # Kokoro-82M via OpenRouter
+lecturn convert mybook.pdf --provider openrouter --dry-run   # free plan + kokoro cost
+```
+
+`--provider` selects the API, the key it reads (`STEPFUN_API_KEY` vs.
+`OPENROUTER_API_KEY`), and the per-provider defaults for `--model` and `--voice`.
+OpenRouter narrates with **Kokoro-82M** — a cheap open-weight model (~$0.62 / 1M
+chars, i.e. `$0.0062 / 10k`) with its own voice IDs (`af_heart`, `bm_george`, …).
+
+```bash
+# OpenRouter with a specific Kokoro voice:
+lecturn convert mybook.pdf --provider openrouter --voice bf_emma
+```
+
+> `--fallback-model` is a **StepFun** concept (retry a rejected model on the
+> economy tier). OpenRouter offers a single model, so it has no fallback — the
+> flag is ignored there.
 
 ### Choose the model (quality vs. cost)
 
@@ -340,13 +365,18 @@ rm -rf output/.audiobook_cache
 
 ## Choosing a voice
 
-StepFun uses its own voice IDs (**not** OpenAI names like `alloy`). Browse them:
+Each provider has its own voice IDs. Browse them (both catalogues, or filter):
 
 ```bash
-lecturn list-voices
+lecturn list-voices                          # both providers
+lecturn list-voices --provider stepfun       # StepFun only
+lecturn list-voices --provider openrouter    # Kokoro (OpenRouter) only
 ```
 
-The default is **`lively-girl`**. A few commonly useful, widely-available voices:
+### StepFun voices
+
+StepFun uses its own voice IDs (**not** OpenAI names like `alloy`). The default
+is **`lively-girl`**. A few commonly useful, widely-available voices:
 
 | Voice ID | Character |
 | --- | --- |
@@ -365,13 +395,34 @@ The default is **`lively-girl`**. A few commonly useful, widely-available voices
 > Pinyin-keyed voice is rejected, try one of those. Run `lecturn list-voices` for
 > the full set (~36 voices).
 
+### OpenRouter (Kokoro) voices
+
+With `--provider openrouter`, use Kokoro-82M voice IDs. The default is
+**`af_heart`**. IDs are prefixed by locale/gender — `af_`/`am_` = US
+female/male, `bf_`/`bm_` = UK female/male — and carry a quality grade (A best →
+D) shown by `list-voices`:
+
+| Voice ID | Character |
+| --- | --- |
+| `af_heart` | US female, grade A (default) |
+| `af_bella` | US female, grade A- |
+| `af_nicole` | US female, grade B- |
+| `bf_emma` | UK female, grade B- |
+| `am_michael` | US male |
+| `bm_george` | UK male, grade C |
+
+Run `lecturn list-voices --provider openrouter` for the full set with grades.
+
 ---
 
 ## Choosing a model
 
 ```bash
-lecturn list-models
+lecturn list-models                          # both providers
+lecturn list-models --provider openrouter    # one provider
 ```
+
+### StepFun models
 
 | Model | Price / 10k chars | Notes |
 | --- | --- | --- |
@@ -388,6 +439,15 @@ model actually used.
 > `--model step-tts-2` directly to skip the wasted first attempt on each run.
 > Auth (`401`) and bad-voice errors never trigger a fallback (a model swap can't
 > fix them).
+
+### OpenRouter models
+
+| Model | Price / 10k chars | Notes |
+| --- | --- | --- |
+| `hexgrad/kokoro-82m` | $0.0062 | Lightweight open-weight model (~$0.62 / 1M chars). Default and only OpenRouter model. |
+
+There is no fallback model on OpenRouter (`--fallback-model` is ignored) — Kokoro
+is the single available model.
 
 ---
 
@@ -409,15 +469,19 @@ All outputs get ID3v2 tags: title (`TIT2`), author/artist (`TPE1`), album
 
 | Variable | Purpose |
 | --- | --- |
-| `STEPFUN_API_KEY` | Your StepFun API key (required for real synthesis). |
-| `STEPFUN_STEP_PLAN_API_KEY` | Alternative key name, used if `STEPFUN_API_KEY` is unset. |
-| `STEPFUN_BASE_URL` | Override the API base URL (or use `--base-url`). |
+| `STEPFUN_API_KEY` | Your StepFun API key (required for real synthesis with `--provider stepfun`). |
+| `STEPFUN_STEP_PLAN_API_KEY` | Alternative StepFun key name, used if `STEPFUN_API_KEY` is unset. |
+| `STEPFUN_BASE_URL` | Override the StepFun API base URL (or use `--base-url`). |
+| `OPENROUTER_API_KEY` | Your OpenRouter API key (required for real synthesis with `--provider openrouter`). |
+| `OPENROUTER_BASE_URL` | Override the OpenRouter API base URL (or use `--base-url`). |
 
 ```bash
-export STEPFUN_API_KEY="sk-..."
+export STEPFUN_API_KEY="sk-..."          # for --provider stepfun (default)
+export OPENROUTER_API_KEY="sk-or-..."    # for --provider openrouter
 ```
 
-`--dry-run`, `list-models`, and `list-voices` need **no** key.
+You only need the key for the provider you use. `--dry-run`, `list-models`, and
+`list-voices` need **no** key.
 
 ---
 
@@ -440,7 +504,8 @@ Useful for scripting:
 | --- | --- |
 | `StepFun rejected the voice … voice_id_invalid` | The voice isn't enabled for your account. Run `list-voices` and try another — English-keyed voices are the most available. |
 | `quota_exceeded` / HTTP 402 | Out of credit for that **model**. It's per-model: `step-tts-2` may work when `stepaudio-2.5-tts` doesn't. Top up, or pass `--model step-tts-2`. |
-| `authentication failed` / HTTP 401 | Bad/missing key. Check `STEPFUN_API_KEY`. (No fallback — a model swap can't fix a bad key.) |
+| `authentication failed` / HTTP 401 | Bad/missing key. Check `STEPFUN_API_KEY` (or `OPENROUTER_API_KEY` for `--provider openrouter`). (No fallback — a model swap can't fix a bad key.) |
+| `OpenRouter rejected the voice …` | Not a valid Kokoro voice ID. Run `lecturn list-voices --provider openrouter` and pick one (e.g. `af_heart`). |
 | `Unsupported file type` | Use `.pdf`, `.epub`, `.md`, `.markdown`, `.txt`, or `.text`. |
 | `image-only PDF with no text layer` | The PDF has no extractable text (scanned images). OCR is out of scope for v1. |
 | `Failed to decode … Is ffmpeg installed?` | Install ffmpeg and ensure it's on `PATH` (`brew install ffmpeg`). |

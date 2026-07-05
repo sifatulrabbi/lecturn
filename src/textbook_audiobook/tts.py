@@ -1,12 +1,16 @@
-"""StepFun TTS client.
+"""TTS clients for the supported OpenAI-compatible providers.
 
-Uses the OpenAI Python SDK pointed at StepFun's OpenAI-compatible base URL
-(``https://api.stepfun.ai/v1``). Calls ``POST /v1/audio/speech`` once per chunk
-and writes the complete MP3 response to disk. No streaming — each call returns a
-full audio file (see PLAN.md "Response Behaviour").
+Both StepFun and OpenRouter expose the same ``POST /audio/speech`` shape, so the
+transport, retry/backoff, model-fallback, atomic-write, and error-mapping logic
+is shared in :class:`_BaseTTSClient`. Each provider is a thin subclass that only
+supplies human-readable error guidance via ``_explain`` — everything else is
+identical. Uses the OpenAI Python SDK pointed at the provider's base URL, calls
+the endpoint once per chunk, and writes the complete MP3 response to disk (no
+streaming — each call returns a full audio file, see PLAN.md "Response
+Behaviour").
 
-Handles transient failures with exponential backoff, honouring ``Retry-After``
-on rate-limit (429) responses.
+Transient failures are retried with exponential backoff, honouring
+``Retry-After`` on rate-limit (429) responses.
 """
 
 from __future__ import annotations
@@ -16,8 +20,9 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
-from textbook_audiobook.config import HARD_CHAR_LIMIT, StepFunConfig
+from textbook_audiobook.config import HARD_CHAR_LIMIT, TTSConfig
 from textbook_audiobook.models import Chunk
 
 
@@ -65,8 +70,22 @@ class SynthesisStats:
 
 
 @dataclass
-class StepFunTTSClient:
-    config: StepFunConfig
+class _BaseTTSClient:
+    """Provider-agnostic TTS client.
+
+    Holds all the transport machinery shared by every provider: the retry/backoff
+    loop, ``Retry-After`` handling, automatic model fallback, atomic cache writes,
+    OpenAI-SDK error mapping, and thread-safe stats. Providers subclass this and
+    override :meth:`_explain` to give account-specific guidance; the config is
+    duck-typed (only ``.api_key`` / ``.base_url`` / ``.model`` / ``.voice`` /
+    ``.response_format`` are used), so any :data:`~textbook_audiobook.config.TTSConfig`
+    works. Not instantiated directly — use a provider subclass.
+    """
+
+    # Human-readable provider name used in error messages; subclasses override.
+    provider_label: ClassVar[str] = "The TTS provider"
+
+    config: TTSConfig
     max_retries: int = 5
     base_backoff: float = 1.0
     max_backoff: float = 60.0
@@ -109,7 +128,7 @@ class StepFunTTSClient:
         if chunk.char_count > HARD_CHAR_LIMIT:
             raise TTSError(
                 f"Chunk {chunk.index} has {chunk.char_count} chars, exceeding "
-                f"StepFun's hard limit of {HARD_CHAR_LIMIT}."
+                f"the hard limit of {HARD_CHAR_LIMIT}."
             )
         return self.synthesize_text(chunk.text, out_path)
 
@@ -203,35 +222,14 @@ class StepFunTTSClient:
 
     @staticmethod
     def _explain(exc: "_FatalError") -> str:
-        """Turn a fatal error into an actionable message."""
+        """Turn a fatal error into an actionable message.
 
-        if exc.category == "quota":
-            return (
-                f"StepFun rejected the request: {exc} "
-                "Your account has no remaining quota/credit for this model. "
-                "Add credit or switch plans at https://platform.stepfun.ai, or "
-                "try the economy model with --model step-tts-2."
-            )
-        if exc.category == "auth":
-            return (
-                f"StepFun authentication failed: {exc} "
-                "Check that STEPFUN_API_KEY is set to a valid key."
-            )
-        if exc.category == "voice":
-            return (
-                f"StepFun rejected the voice: {exc} "
-                "This voice ID may not be enabled for your account (access is "
-                "per-account). Run `list-voices` and try another — the "
-                "English-keyed voices (e.g. 'lively-girl', 'elegantgentle-female') "
-                "are the most widely available. Note: OpenAI names like 'alloy' "
-                "are not valid StepFun voices."
-            )
-        if exc.category == "model":
-            return (
-                f"StepFun rejected the model: {exc} "
-                "Verify the --model name (e.g. stepaudio-2.5-tts or step-tts-2)."
-            )
-        return f"StepFun request failed: {exc}"
+        Provider hook: the generic default is deliberately terse. Each provider
+        subclass overrides this with account-specific guidance (quota top-up
+        links, which env var to check, how to list voices).
+        """
+
+        return f"TTS request failed: {exc}"
 
     def _request_audio(self, text: str, model: str) -> bytes:
         """Make one API call and return the complete audio payload as bytes."""
@@ -284,7 +282,7 @@ class StepFunTTSClient:
         if content is None and hasattr(response, "read"):
             content = response.read()
         if not content:
-            raise TTSError("StepFun returned an empty audio payload.")
+            raise TTSError(f"{self.provider_label} returned an empty audio payload.")
         return content
 
     # -- convenience ------------------------------------------------------
@@ -298,6 +296,94 @@ class StepFunTTSClient:
         """
 
         return None
+
+
+@dataclass
+class StepFunTTSClient(_BaseTTSClient):
+    """TTS client for StepFun (``https://api.stepfun.ai/v1``).
+
+    Behaviour is identical to the pre-refactor client; only the provider-specific
+    error guidance lives here. Fallback to an economy model is a StepFun concept,
+    so ``fallback_model`` stays available (default off).
+    """
+
+    provider_label: ClassVar[str] = "StepFun"
+
+    @staticmethod
+    def _explain(exc: "_FatalError") -> str:
+        """Turn a fatal error into an actionable, StepFun-specific message."""
+
+        if exc.category == "quota":
+            return (
+                f"StepFun rejected the request: {exc} "
+                "Your account has no remaining quota/credit for this model. "
+                "Add credit or switch plans at https://platform.stepfun.ai, or "
+                "try the economy model with --model step-tts-2."
+            )
+        if exc.category == "auth":
+            return (
+                f"StepFun authentication failed: {exc} "
+                "Check that STEPFUN_API_KEY is set to a valid key."
+            )
+        if exc.category == "voice":
+            return (
+                f"StepFun rejected the voice: {exc} "
+                "This voice ID may not be enabled for your account (access is "
+                "per-account). Run `list-voices` and try another — the "
+                "English-keyed voices (e.g. 'lively-girl', 'elegantgentle-female') "
+                "are the most widely available. Note: OpenAI names like 'alloy' "
+                "are not valid StepFun voices."
+            )
+        if exc.category == "model":
+            return (
+                f"StepFun rejected the model: {exc} "
+                "Verify the --model name (e.g. stepaudio-2.5-tts or step-tts-2)."
+            )
+        return f"StepFun request failed: {exc}"
+
+
+@dataclass
+class OpenRouterTTSClient(_BaseTTSClient):
+    """TTS client for OpenRouter (``https://openrouter.ai/api/v1``, Kokoro-82M).
+
+    Same transport as StepFun; only the error guidance differs. Model fallback is
+    a StepFun-tier concept, so it defaults off here (``fallback_model=None``) —
+    Kokoro is the single OpenRouter model — though a caller may still set one.
+    """
+
+    provider_label: ClassVar[str] = "OpenRouter"
+
+    fallback_model: str | None = None
+
+    @staticmethod
+    def _explain(exc: "_FatalError") -> str:
+        """Turn a fatal error into an actionable, OpenRouter-specific message."""
+
+        if exc.category == "quota":
+            return (
+                f"OpenRouter rejected the request: {exc} "
+                "Your account is out of credits for this model. Add credits at "
+                "https://openrouter.ai/settings/credits."
+            )
+        if exc.category == "auth":
+            return (
+                f"OpenRouter authentication failed: {exc} "
+                "Check that OPENROUTER_API_KEY is set to a valid key."
+            )
+        if exc.category == "voice":
+            return (
+                f"OpenRouter rejected the voice: {exc} "
+                "Run `lecturn list-voices --provider openrouter` and pick a valid "
+                "Kokoro voice ID (e.g. 'af_heart')."
+            )
+        if exc.category == "model":
+            return (
+                f"OpenRouter rejected the model: {exc} "
+                "Verify the --model name against "
+                "`lecturn list-models --provider openrouter` "
+                "(e.g. 'hexgrad/kokoro-82m')."
+            )
+        return f"OpenRouter request failed: {exc}"
 
 
 class _RetryableError(Exception):

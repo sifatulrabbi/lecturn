@@ -1,8 +1,9 @@
 # CLAUDE.md — guidance for AI agents working in this repo
 
 `lecturn` (package `textbook_audiobook`) is a Python 3.12+ CLI that converts
-textbooks (PDF/EPUB/TXT/MD) into narrated MP3 audiobooks via StepFun's TTS API.
-Managed with `uv`.
+textbooks (PDF/EPUB/TXT/MD) into narrated MP3 audiobooks via a TTS provider —
+StepFun (default) or OpenRouter/Kokoro (`--provider openrouter`). Managed with
+`uv`.
 
 Human docs: [docs/SETUP.md](docs/SETUP.md) · [docs/USAGE.md](docs/USAGE.md) ·
 [docs/DEV.md](docs/DEV.md). Read `docs/DEV.md` for architecture and invariants
@@ -12,9 +13,9 @@ before changing pipeline/TTS code.
 
 - **Never start a live audio-generation run without the user's explicit
   consent.** Any `lecturn convert` *without* `--dry-run`, or any script that
-  calls the StepFun TTS API, spends real money and consumes tight per-model rate
-  limits (5 concurrent / 10 RPM). Ask first, every time — even when it seems like
-  the obvious next step.
+  calls the StepFun or OpenRouter TTS API, spends real money and (for StepFun)
+  consumes tight per-model rate limits (5 concurrent / 10 RPM). Ask first, every
+  time — even when it seems like the obvious next step.
 - Safe to run anytime (network-free, no key): `--dry-run`, `lecturn list-models`,
   `lecturn list-voices`, and `uv run pytest`.
 - `GET /v1/models` (HTTP 200) is a free way to check the key/list live models
@@ -48,6 +49,15 @@ a live API.
   validation, so during a quota outage every voice appears to fail — that's not a
   voice bug. If premium is dry, use `--model step-tts-2`.
 - `step-tts-mini` is **not** a live model (absent from `GET /v1/models`).
+
+## OpenRouter gotchas
+
+- **OpenRouter's `/audio/speech` defaults to `response_format: pcm`**, not mp3.
+  lecturn always sends `mp3` explicitly — never omit it, or the MP3
+  magic-byte cache validation and pydub stitching break.
+- Kokoro voice IDs are namespaced by language/gender prefix (`af_`, `am_`,
+  `bf_`, `bm_`, …); quality varies a lot — `af_heart` (A grade, the default)
+  and `af_bella` (A-) are the best English voices.
 
 ## Invariants not to break
 

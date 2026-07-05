@@ -1,12 +1,15 @@
 # lecturn
 
 Convert textbooks — **PDF, EPUB, plain text, or Markdown** — into narrated MP3
-audiobooks using [StepFun's](https://platform.stepfun.ai) TTS API.
+audiobooks using [StepFun's](https://platform.stepfun.ai) TTS API (default) or
+[OpenRouter](https://openrouter.ai) (Kokoro-82M), selectable with `--provider`.
 
 ```
-load → clean → chunk → synthesize (StepFun TTS) → assemble (MP3 + ID3)
+load → clean → chunk → synthesize (StepFun / OpenRouter TTS) → assemble (MP3 + ID3)
 ```
 
+- **Two providers** — StepFun (premium/economy) or OpenRouter's Kokoro-82M
+  (cheap, open-weight); pick with `--provider`.
 - **Chapter-aware** — detects chapters (PDF TOC, EPUB spine, `#`/`##`, `---`) and
   can emit one tagged MP3 per chapter.
 - **Fast, within limits** — bounded concurrency + an RPM throttle; faster at the
@@ -19,10 +22,12 @@ load → clean → chunk → synthesize (StepFun TTS) → assemble (MP3 + ID3)
 
 ```bash
 uv tool install .                          # install the `lecturn` command
-export STEPFUN_API_KEY="sk-..."            # your StepFun key
+export STEPFUN_API_KEY="sk-..."            # your StepFun key (default provider)
+# or, for Kokoro: export OPENROUTER_API_KEY="sk-or-..."
 
-lecturn convert mybook.pdf --dry-run       # free: shows plan + cost estimate
-lecturn convert mybook.pdf -o output/      # convert (prompts to confirm cost)
+lecturn convert mybook.pdf --dry-run                  # free: shows plan + cost estimate
+lecturn convert mybook.pdf -o output/                 # convert (prompts to confirm cost)
+lecturn convert mybook.pdf --provider openrouter      # narrate with Kokoro-82M
 ```
 
 `--dry-run`, `lecturn list-models`, and `lecturn list-voices` need no API key.

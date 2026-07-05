@@ -20,6 +20,7 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 from rich.console import Console
 from rich.progress import (
@@ -34,10 +35,10 @@ from rich.progress import (
 
 from textbook_audiobook import assembler, chunker, cleaner
 from textbook_audiobook.assembler import AssemblyResult
-from textbook_audiobook.config import StepFunConfig, estimate_cost
+from textbook_audiobook.config import TTSConfig, estimate_cost
 from textbook_audiobook.loaders import load_document
 from textbook_audiobook.models import Chunk, Document
-from textbook_audiobook.tts import StepFunTTSClient
+from textbook_audiobook.tts import _BaseTTSClient, StepFunTTSClient
 
 # Sensible default for the synth stage. The library default is 1 (sequential);
 # the CLI raises it. Concurrency above the account's per-model limit only trips
@@ -95,20 +96,31 @@ def _plan(document: Document, max_chars: int) -> tuple[Document, list[Chunk]]:
 def run_pipeline(
     input_path: Path,
     output_dir: Path,
-    config: StepFunConfig,
+    config: TTSConfig,
     *,
     title: str | None = None,
     author: str | None = None,
     max_chars: int,
     split_by_chapter: bool = False,
     fallback_model: str | None = None,
+    client_factory: Callable[[], _BaseTTSClient] | None = None,
     cache_dir: Path | None = None,
     resume: bool = True,
     concurrency: int = DEFAULT_CONCURRENCY,
     rpm: int = DEFAULT_RPM,
     console: Console | None = None,
 ) -> PipelineResult:
-    """Execute the full pipeline and return a :class:`PipelineResult`."""
+    """Execute the full pipeline and return a :class:`PipelineResult`.
+
+    The TTS provider is chosen by ``client_factory``: a zero-arg callable that
+    returns a built :class:`~textbook_audiobook.tts._BaseTTSClient`. When omitted,
+    the pipeline builds a :class:`~textbook_audiobook.tts.StepFunTTSClient` from
+    ``config`` and ``fallback_model`` — preserving the original StepFun-only
+    behaviour so existing callers need no change. Callers selecting another
+    provider (e.g. OpenRouter) pass a factory and still pass the matching
+    ``config`` (used for the resume-cache fingerprint and cost estimate).
+    ``fallback_model`` is only consulted by the default StepFun factory.
+    """
 
     console = console or Console()
 
@@ -123,7 +135,10 @@ def run_pipeline(
     cache_dir = cache_dir or (output_dir / ".audiobook_cache" / cleaned.slug)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    client = StepFunTTSClient(config=config, fallback_model=fallback_model)
+    if client_factory is None:
+        client = StepFunTTSClient(config=config, fallback_model=fallback_model)
+    else:
+        client = client_factory()
     chunk_files = _synthesize_all(
         chunks, client, cache_dir, config,
         resume=resume, concurrency=concurrency, rpm=rpm, console=console,
@@ -154,7 +169,7 @@ def run_pipeline(
     )
 
 
-def _chunk_fingerprint(config: StepFunConfig, text: str) -> str:
+def _chunk_fingerprint(config: TTSConfig, text: str) -> str:
     """Short hash identifying a cached chunk by narrator + content.
 
     Deliberately keyed on the ``voice``, response ``format``, and chunk text —
@@ -174,7 +189,7 @@ def _chunk_fingerprint(config: StepFunConfig, text: str) -> str:
     return h.hexdigest()[:12]
 
 
-def _chunk_cache_path(cache_dir: Path, chunk: Chunk, config: StepFunConfig) -> Path:
+def _chunk_cache_path(cache_dir: Path, chunk: Chunk, config: TTSConfig) -> Path:
     fp = _chunk_fingerprint(config, chunk.text)
     return cache_dir / f"chunk_{chunk.index:05d}_{fp}.mp3"
 
@@ -226,9 +241,9 @@ def _make_progress(console: Console) -> Progress:
 
 def _synthesize_all(
     chunks: list[Chunk],
-    client: StepFunTTSClient,
+    client: _BaseTTSClient,
     cache_dir: Path,
-    config: StepFunConfig,
+    config: TTSConfig,
     *,
     resume: bool,
     concurrency: int = DEFAULT_CONCURRENCY,
@@ -284,7 +299,7 @@ def _synthesize_all(
 def _synthesize_concurrent(
     todo: list[tuple[Chunk, Path]],
     chunk_files: dict[int, Path],
-    client: StepFunTTSClient,
+    client: _BaseTTSClient,
     limiter: _RateLimiter,
     progress: Progress,
     task,

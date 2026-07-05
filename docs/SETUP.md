@@ -13,8 +13,9 @@ usage after this, see [USAGE.md](USAGE.md).
   - macOS: `brew install ffmpeg`
   - Debian/Ubuntu: `sudo apt-get install ffmpeg`
   - Windows: `winget install Gyan.FFmpeg` (or `choco install ffmpeg`)
-- A **StepFun API key** (only needed for real synthesis, not for `--dry-run` /
-  `list-*`)
+- A **TTS provider API key** — a **StepFun** key (default provider) and/or an
+  **OpenRouter** key (for `--provider openrouter`, Kokoro-82M). Only needed for
+  real synthesis, not for `--dry-run` / `list-*`.
 
 Check ffmpeg is available:
 
@@ -64,15 +65,17 @@ For a dev setup that includes test dependencies, see [DEV.md](DEV.md).
 
 ## Configure credentials
 
-The key is read from the environment — never hard-code or commit it.
+Keys are read from the environment — never hard-code or commit them. You only
+need the key for the provider you use (`--provider`, default `stepfun`).
+
+### StepFun (default provider)
 
 ```bash
 export STEPFUN_API_KEY="sk-..."
 ```
 
-Add that line to your shell profile (`~/.zshrc`, `~/.bashrc`) to persist it.
-
-Accepted variables:
+Get a key from [platform.stepfun.ai](https://platform.stepfun.ai). Add the line
+to your shell profile (`~/.zshrc`, `~/.bashrc`) to persist it.
 
 | Variable | Purpose |
 | --- | --- |
@@ -80,8 +83,26 @@ Accepted variables:
 | `STEPFUN_STEP_PLAN_API_KEY` | Fallback key name if the above is unset. |
 | `STEPFUN_BASE_URL` | Optional API base URL override (default `https://api.stepfun.ai/v1`). |
 
+### OpenRouter (`--provider openrouter`, Kokoro-82M)
+
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+Create a key at
+[openrouter.ai/settings/keys](https://openrouter.ai/settings/keys). Kokoro-82M
+is a cheap open-weight voice model (~$0.62 / 1M chars).
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENROUTER_API_KEY` | Your OpenRouter API key. |
+| `OPENROUTER_BASE_URL` | Optional API base URL override (default `https://openrouter.ai/api/v1`). |
+
 > `--dry-run`, `lecturn list-models`, and `lecturn list-voices` work **without**
-> a key — handy for verifying the install before adding credentials.
+> any key — handy for verifying the install before adding credentials.
+
+A [`.env.example`](../.env.example) at the repo root lists every accepted
+variable.
 
 ---
 
