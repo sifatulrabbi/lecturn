@@ -34,10 +34,12 @@ src/textbook_audiobook/
 │   └── text_loader.py    # `---` delimiter → chapters
 ├── cleaner.py        # strip page numbers / running headers / URLs; fix hyphenation
 ├── chunker.py        # ≤1000-char sentence-boundary chunking; never crosses chapters
-├── tts.py            # StepFun client (OpenAI SDK): retries, error tiering, fallback,
-│                     #   atomic writes, thread-safe stats
+├── tts.py            # TTS clients (OpenAI SDK): _BaseTTSClient (retries, error
+│                     #   tiering, fallback, atomic writes, thread-safe stats) +
+│                     #   StepFunTTSClient / OpenRouterTTSClient subclasses
 ├── assembler.py      # pydub concat (single / per-chapter) + mutagen ID3 tags
-├── config.py         # constants, model pricing, voice catalogue, env-key resolution
+├── config.py         # constants, model pricing, voice catalogues, env-key
+│                     #   resolution; StepFunConfig / OpenRouterConfig (TTSConfig union)
 ├── models.py         # Document / Chapter / Chunk dataclasses + slugify
 └── __main__.py       # `python -m textbook_audiobook`
 
@@ -87,22 +89,64 @@ Coverage highlights:
 - **Chunker / cleaner** — the deterministic core.
 - **Assembler** — real concat + ID3 readback (single-file and per-chapter tracks).
 - **TTS client** — retry/backoff, error classification, model fallback, atomic
-  write leaves no partial file on failure.
+  write leaves no partial file on failure. OpenRouter
+  (`test_tts_openrouter.py`): its error guidance, no-fallback default, and that
+  the real request always sends `response_format="mp3"`.
 - **Pipeline** — end-to-end; resume (skip cached), `--no-resume`, fingerprint
   invalidation on voice change, cache reuse across model switch, corrupt-cache
-  rejection, concurrency is bounded, the
-  RPM rate limiter, and the sequential (`concurrency=1`) guarantee.
-- **CLI** — argument validation, dry-run, catalogue commands, version.
+  rejection, concurrency is bounded, the RPM rate limiter, and the sequential
+  (`concurrency=1`) guarantee. The OpenRouter `client_factory` seam and its
+  cross-run cache hits (`test_pipeline_openrouter.py`).
+- **CLI** — argument validation, dry-run, catalogue commands (grouped + the
+  `--provider` filter), per-provider defaults, version.
 
 > If you add a feature that touches the network path, stub it — never make the
 > suite depend on a live API or key.
 
 ---
 
+## Provider architecture (StepFun + OpenRouter)
+
+Two TTS providers are supported, selected by the CLI's `--provider` flag
+(`stepfun`, the default, or `openrouter`). Both expose the same OpenAI-compatible
+`POST /audio/speech` shape, so almost everything is shared:
+
+- **One transport, two thin subclasses.** `tts._BaseTTSClient` holds all the
+  machinery (retry/backoff, `Retry-After`, model fallback, atomic writes,
+  OpenAI-SDK error mapping, thread-safe stats). `StepFunTTSClient` and
+  `OpenRouterTTSClient` only override `_explain()` for account-specific error
+  guidance. The config is duck-typed (`.api_key` / `.base_url` / `.model` /
+  `.voice` / `.response_format`), so either provider's config flows through.
+- **Two configs, one union.** `config.StepFunConfig` and `config.OpenRouterConfig`
+  each resolve their own key/base-URL from the environment
+  (`STEPFUN_API_KEY` / `OPENROUTER_API_KEY`, `*_BASE_URL`). `config.TTSConfig` is
+  their union — the type used wherever "a config for either provider" is meant.
+- **Pipeline seam.** `pipeline.run_pipeline(..., client_factory=None)` builds a
+  `StepFunTTSClient` by default (unchanged StepFun path); the CLI passes a
+  `client_factory` returning an `OpenRouterTTSClient` for `--provider openrouter`.
+  `fallback_model` is only consulted by the default StepFun factory.
+- **Two catalogues.** `config.MODELS` / `VOICES` (StepFun) and
+  `config.OPENROUTER_MODELS` / `KOKORO_VOICES` (Kokoro). `estimate_cost` looks in
+  both; `list-models` / `list-voices` print both, grouped, with a `--provider`
+  filter.
+- **Fingerprint invariant unchanged.** The resume-cache fingerprint stays
+  voice+response_format+text (still **not** the model, and **no** provider tag).
+  Kokoro voice IDs (`af_heart`, …) are structurally disjoint from StepFun's
+  (`lively-girl`, …), so they can never collide — a cache keyed on the voice is
+  already provider-safe.
+- **OpenRouter PCM gotcha.** OpenRouter's `/audio/speech` defaults to raw **PCM**;
+  `OpenRouterConfig.response_format` defaults to `"mp3"` and the client always
+  sends it. Never omit it, or MP3 magic-byte cache validation and pydub stitching
+  break. `test_tts_openrouter.py` guards this on the real request kwargs.
+- **No OpenRouter fallback.** Kokoro is the only OpenRouter model, so
+  `OpenRouterTTSClient.fallback_model` defaults to `None` (fallback stays a
+  StepFun-tier concept).
+
 ## Key design decisions & invariants
 
-- **StepFun via the OpenAI SDK** pointed at `https://api.stepfun.ai/v1`. No
-  streaming — each chunk is one full-file synth call.
+- **Providers via the OpenAI SDK** — StepFun at `https://api.stepfun.ai/v1`,
+  OpenRouter at `https://openrouter.ai/api/v1`. No streaming — each chunk is one
+  full-file synth call.
 - **1000-char hard cap** per request (`config.HARD_CHAR_LIMIT`). The chunker
   guarantees no chunk exceeds it; `--max-chars` can only lower it.
 - **Synthesis defaults to sequential** at the library level

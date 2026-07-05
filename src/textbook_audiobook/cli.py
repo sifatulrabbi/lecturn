@@ -2,12 +2,17 @@
 
 Subcommands:
   convert       Convert an input file into an audiobook (the main command).
-  list-voices   Show the known voice catalogue.
-  list-models   Show available models and pricing.
+  list-voices   Show the known voice catalogues (per provider).
+  list-models   Show available models and pricing (per provider).
+
+Two TTS providers are selectable via ``--provider``: ``stepfun`` (the default,
+premium/economy StepFun models) and ``openrouter`` (Kokoro-82M). ``--model`` /
+``--voice`` / ``--fallback-model`` default per provider — pass them to override.
 """
 
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -21,18 +26,40 @@ from textbook_audiobook.config import (
     DEFAULT_VOICE,
     ECONOMY_MODEL,
     HARD_CHAR_LIMIT,
+    KOKORO_VOICES,
     MODELS,
+    OPENROUTER_DEFAULT_MODEL,
+    OPENROUTER_DEFAULT_VOICE,
+    OPENROUTER_MODELS,
     VOICES,
     MissingApiKeyError,
+    OpenRouterConfig,
     StepFunConfig,
 )
 from textbook_audiobook.loaders import LoaderError, SUPPORTED_EXTENSIONS
 from textbook_audiobook import pipeline
 from textbook_audiobook.pipeline import DEFAULT_RPM, MAX_USEFUL_CONCURRENCY
+from textbook_audiobook.tts import OpenRouterTTSClient
+
+
+class Provider(str, Enum):
+    """TTS provider selector.
+
+    ``stepfun`` is the original (and default) provider; ``openrouter`` narrates
+    with Kokoro-82M. A ``str`` Enum so Typer renders ``[stepfun|openrouter]``
+    choices and validates them for us.
+    """
+
+    stepfun = "stepfun"
+    openrouter = "openrouter"
+
 
 app = typer.Typer(
     add_completion=False,
-    help="Convert textbooks (PDF/EPUB/TXT/MD) into narrated audiobooks via StepFun TTS.",
+    help=(
+        "Convert textbooks (PDF/EPUB/TXT/MD) into narrated audiobooks via "
+        "StepFun or OpenRouter (Kokoro) TTS."
+    ),
     no_args_is_help=True,
 )
 console = Console()
@@ -66,18 +93,31 @@ def convert(
     output_dir: Path = typer.Option(
         Path("output"), "--output", "-o", help="Directory for output MP3(s)."
     ),
-    model: str = typer.Option(
-        DEFAULT_MODEL, "--model", "-m",
-        help="TTS model. Default is the best-quality model.",
+    provider: Provider = typer.Option(
+        Provider.stepfun, "--provider",
+        case_sensitive=False,
+        help="TTS provider: 'stepfun' (default) or 'openrouter' (Kokoro-82M).",
     ),
-    voice: str = typer.Option(
-        DEFAULT_VOICE, "--voice", help="Voice name."
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
+        help=(
+            "TTS model. Defaults to the provider's best-quality model "
+            "(stepfun: stepaudio-2.5-tts, openrouter: hexgrad/kokoro-82m)."
+        ),
     ),
-    fallback_model: str = typer.Option(
-        ECONOMY_MODEL, "--fallback-model",
+    voice: Optional[str] = typer.Option(
+        None, "--voice",
+        help=(
+            "Voice ID. Defaults per provider "
+            "(stepfun: lively-girl, openrouter: af_heart)."
+        ),
+    ),
+    fallback_model: Optional[str] = typer.Option(
+        None, "--fallback-model",
         help=(
             "Model to retry with if the primary model is rejected (e.g. quota "
-            "or entitlement). Pass 'none' to disable fallback."
+            "or entitlement). StepFun only — defaults to step-tts-2; OpenRouter "
+            "has no fallback. Pass 'none' to disable."
         ),
     ),
     title: Optional[str] = typer.Option(
@@ -95,7 +135,7 @@ def convert(
         help=f"Max chars per chunk (hard cap {HARD_CHAR_LIMIT}).",
     ),
     base_url: Optional[str] = typer.Option(
-        None, "--base-url", help="Override the StepFun base URL."
+        None, "--base-url", help="Override the provider's API base URL."
     ),
     no_resume: bool = typer.Option(
         False, "--no-resume",
@@ -155,24 +195,53 @@ def convert(
         console.print("[red]--rpm cannot be negative (use 0 to disable).[/red]")
         raise typer.Exit(code=2)
 
-    if model not in MODELS:
+    # --- Resolve per-provider defaults --------------------------------------
+    # Each flag defaults to None so we can tell "not given" from an explicit
+    # value and fill in the right provider default here. The StepFun branch
+    # reproduces the pre-provider behaviour byte-for-byte.
+    if provider is Provider.openrouter:
+        resolved_model = model if model is not None else OPENROUTER_DEFAULT_MODEL
+        resolved_voice = voice if voice is not None else OPENROUTER_DEFAULT_VOICE
+        default_fallback: str | None = None
+        known_models = OPENROUTER_MODELS
+    else:
+        resolved_model = model if model is not None else DEFAULT_MODEL
+        resolved_voice = voice if voice is not None else DEFAULT_VOICE
+        default_fallback = ECONOMY_MODEL
+        known_models = MODELS
+
+    # Fallback is a StepFun-tier concept: an economy model to retry with. When
+    # not given, use the provider default (StepFun: economy; OpenRouter: none).
+    if fallback_model is None:
+        resolved_fallback = default_fallback
+    elif fallback_model.strip().lower() in {"none", ""}:
+        resolved_fallback = None
+    else:
+        resolved_fallback = fallback_model
+    if resolved_fallback == resolved_model:
+        resolved_fallback = None  # a fallback equal to the primary is a no-op
+
+    if resolved_model not in known_models:
         console.print(
-            f"[yellow]Warning:[/yellow] '{model}' is not a known model "
-            f"({', '.join(MODELS)}). Proceeding anyway."
+            f"[yellow]Warning:[/yellow] '{resolved_model}' is not a known model "
+            f"({', '.join(known_models)}). Proceeding anyway."
         )
 
     # --- Plan (no API calls) ------------------------------------------------
     try:
         document, chunks, estimate = pipeline.plan_only(
             input_file, title=title, author=author,
-            max_chars=max_chars, model=model,
+            max_chars=max_chars, model=resolved_model,
         )
     except LoaderError as exc:
         console.print(f"[red]Failed to load input:[/red] {exc}")
         raise typer.Exit(code=1)
 
     total_chars = sum(c.char_count for c in chunks)
-    _print_plan(document, chunks, total_chars, estimate, model)
+    _print_plan(
+        document, chunks, total_chars, estimate,
+        provider.value, resolved_model, resolved_voice,
+    )
 
     if dry_run:
         console.print("[dim]Dry run — no audio generated.[/dim]")
@@ -189,17 +258,30 @@ def convert(
 
     # --- Resolve credentials -----------------------------------------------
     try:
-        config = StepFunConfig.from_env(
-            model=model, voice=voice, base_url=base_url
-        )
+        if provider is Provider.openrouter:
+            config = OpenRouterConfig.from_env(
+                model=resolved_model, voice=resolved_voice, base_url=base_url
+            )
+        else:
+            config = StepFunConfig.from_env(
+                model=resolved_model, voice=resolved_voice, base_url=base_url
+            )
     except MissingApiKeyError as exc:
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=1)
 
     # --- Run ----------------------------------------------------------------
-    resolved_fallback: str | None = fallback_model
-    if fallback_model.strip().lower() in {"none", ""} or fallback_model == model:
-        resolved_fallback = None
+    # StepFun uses the pipeline's default client factory (unchanged path);
+    # OpenRouter supplies its own client via the slice-1 client_factory seam.
+    # ``fallback_model`` is only consulted by the default (StepFun) factory.
+    if provider is Provider.openrouter:
+        def _make_client() -> OpenRouterTTSClient:
+            return OpenRouterTTSClient(
+                config=config, fallback_model=resolved_fallback
+            )
+        client_factory = _make_client
+    else:
+        client_factory = None
 
     try:
         result = pipeline.run_pipeline(
@@ -211,6 +293,7 @@ def convert(
             max_chars=max_chars,
             split_by_chapter=split_by_chapter,
             fallback_model=resolved_fallback,
+            client_factory=client_factory,
             resume=not no_resume,
             concurrency=concurrency,
             rpm=rpm,
@@ -231,48 +314,102 @@ def convert(
 
 
 @app.command("list-voices")
-def list_voices() -> None:
-    """List the known StepFun voice catalogue."""
+def list_voices(
+    provider: Optional[Provider] = typer.Option(
+        None, "--provider",
+        case_sensitive=False,
+        help="Show only one provider's voices (default: both).",
+    ),
+) -> None:
+    """List the known voice catalogues, grouped by provider."""
 
-    table = Table(title="StepFun voices")
-    table.add_column("Voice ID")
-    table.add_column("Description")
-    table.add_column("Default", justify="center")
-    for voice_id, description in VOICES.items():
-        table.add_row(
-            voice_id, description, "✓" if voice_id == DEFAULT_VOICE else ""
+    if provider is None or provider is Provider.stepfun:
+        console.print(_voices_table("StepFun voices", VOICES, DEFAULT_VOICE))
+        console.print(
+            "[dim]These are StepFun voice IDs (not OpenAI names). The set may "
+            "change — validate against a live call. Voice cloning is out of scope "
+            "for v1.[/dim]"
         )
-    console.print(table)
-    console.print(
-        "[dim]These are StepFun voice IDs (not OpenAI names). The set may "
-        "change — validate against a live call. Voice cloning is out of scope "
-        "for v1.[/dim]"
-    )
+    if provider is None or provider is Provider.openrouter:
+        console.print(
+            _voices_table(
+                "OpenRouter (Kokoro-82M) voices",
+                KOKORO_VOICES,
+                OPENROUTER_DEFAULT_VOICE,
+            )
+        )
+        console.print(
+            "[dim]Kokoro voice IDs: af_/am_ = US female/male, bf_/bm_ = UK. "
+            "Parenthesised letters (A best → D) are hexgrad's quality grades. "
+            "Use with --provider openrouter.[/dim]"
+        )
 
 
 @app.command("list-models")
-def list_models() -> None:
-    """List available models and pricing."""
+def list_models(
+    provider: Optional[Provider] = typer.Option(
+        None, "--provider",
+        case_sensitive=False,
+        help="Show only one provider's models (default: both).",
+    ),
+) -> None:
+    """List available models and pricing, grouped by provider."""
 
-    table = Table(title="TTS models")
-    table.add_column("Model")
-    table.add_column("USD / 10k chars", justify="right")
-    table.add_column("Default", justify="center")
-    table.add_column("Description")
-    for name, info in MODELS.items():
-        table.add_row(
-            name,
-            f"${info.price_per_10k_chars:.2f}",
-            "✓" if name == DEFAULT_MODEL else "",
-            info.description,
+    if provider is None or provider is Provider.stepfun:
+        console.print(_models_table("StepFun models", MODELS, DEFAULT_MODEL))
+    if provider is None or provider is Provider.openrouter:
+        console.print(
+            _models_table(
+                "OpenRouter models", OPENROUTER_MODELS, OPENROUTER_DEFAULT_MODEL
+            )
         )
-    console.print(table)
 
 
 # -- output helpers ---------------------------------------------------------
 
 
-def _print_plan(document, chunks, total_chars, estimate, model) -> None:
+def _format_price(price_per_10k: float) -> str:
+    """Format a per-10k-char price with enough precision.
+
+    StepFun's prices are cents-scale ($0.85, $0.40); Kokoro is sub-cent
+    ($0.0062), which ``.2f`` would collapse to a misleading ``$0.01``. Show two
+    decimals for the former and four for the latter so both read accurately.
+    """
+
+    return f"${price_per_10k:.2f}" if price_per_10k >= 0.10 else f"${price_per_10k:.4f}"
+
+
+def _models_table(title: str, models, default_model: str) -> Table:
+    table = Table(title=title)
+    table.add_column("Model")
+    table.add_column("USD / 10k chars", justify="right")
+    table.add_column("Default", justify="center")
+    table.add_column("Description")
+    for name, info in models.items():
+        table.add_row(
+            name,
+            _format_price(info.price_per_10k_chars),
+            "✓" if name == default_model else "",
+            info.description,
+        )
+    return table
+
+
+def _voices_table(title: str, voices, default_voice: str) -> Table:
+    table = Table(title=title)
+    table.add_column("Voice ID")
+    table.add_column("Description")
+    table.add_column("Default", justify="center")
+    for voice_id, description in voices.items():
+        table.add_row(
+            voice_id, description, "✓" if voice_id == default_voice else ""
+        )
+    return table
+
+
+def _print_plan(
+    document, chunks, total_chars, estimate, provider, model, voice
+) -> None:
     table = Table(title="Conversion plan", show_header=False)
     table.add_column(style="bold")
     table.add_column()
@@ -281,7 +418,9 @@ def _print_plan(document, chunks, total_chars, estimate, model) -> None:
     table.add_row("Chapters", str(len(document.chapters)))
     table.add_row("Chunks", str(len(chunks)))
     table.add_row("Characters", f"{total_chars:,}")
+    table.add_row("Provider", provider)
     table.add_row("Model", model)
+    table.add_row("Voice", voice)
     table.add_row("Est. cost", f"${estimate:.2f}")
     console.print(table)
 
