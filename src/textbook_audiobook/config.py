@@ -5,8 +5,10 @@ OpenRouter (Kokoro-82M). Each has its own base URL, API-key env var, model
 pricing, and voice catalogue, but both speak the same ``POST /audio/speech``
 shape so a single transport (the OpenAI SDK) drives both.
 
-Secrets are read from the environment only — never hard-coded. See PLAN.md
-("API Key") for the accepted environment variables.
+Secrets are read from the environment only — never hard-coded. The accepted
+variables are ``STEPFUN_API_KEY`` (or ``STEPFUN_STEP_PLAN_API_KEY``) /
+``STEPFUN_BASE_URL`` for StepFun and ``OPENROUTER_API_KEY`` /
+``OPENROUTER_BASE_URL`` for OpenRouter — see docs/SETUP.md.
 """
 
 from __future__ import annotations
@@ -274,7 +276,11 @@ TTSConfig = StepFunConfig | OpenRouterConfig
 
 
 class MissingApiKeyError(RuntimeError):
-    """Raised when no usable StepFun API key is present in the environment."""
+    """Raised when no usable API key is present for the selected provider.
+
+    Both ``StepFunConfig.from_env`` and ``OpenRouterConfig.from_env`` raise it;
+    the message names the specific environment variable that is missing.
+    """
 
 
 def resolve_api_key() -> str | None:

@@ -198,9 +198,12 @@ def convert(
     """Convert INPUT_FILE into an audiobook."""
 
     if max_chars > HARD_CHAR_LIMIT:
+        # The 1000-char cap is StepFun's constraint, applied to both providers so
+        # the chunking (and resume cache) stays portable between them.
         console.print(
-            f"[red]--max-chars {max_chars} exceeds StepFun's hard limit of "
-            f"{HARD_CHAR_LIMIT}.[/red]"
+            f"[red]--max-chars {max_chars} exceeds the hard limit of "
+            f"{HARD_CHAR_LIMIT} chars (StepFun's cap, applied to both providers "
+            "for cache portability).[/red]"
         )
         raise typer.Exit(code=2)
     if max_chars <= 0:
@@ -211,10 +214,17 @@ def convert(
         console.print("[red]--concurrency must be at least 1.[/red]")
         raise typer.Exit(code=2)
     if concurrency > MAX_USEFUL_CONCURRENCY:
+        # Cite StepFun's limit only for a StepFun run; OpenRouter's limits differ,
+        # so stay provider-neutral there.
+        limit_note = (
+            f"StepFun's per-model concurrency limit ({MAX_USEFUL_CONCURRENCY})"
+            if provider is Provider.stepfun
+            else f"the default cap ({MAX_USEFUL_CONCURRENCY})"
+        )
         console.print(
             f"[yellow]Warning:[/yellow] --concurrency {concurrency} exceeds "
-            f"StepFun's per-model concurrency limit ({MAX_USEFUL_CONCURRENCY}); "
-            "extra requests will just queue behind the --rpm throttle."
+            f"{limit_note}; extra requests will just queue behind the --rpm "
+            "throttle."
         )
     if rpm < 0:
         console.print("[red]--rpm cannot be negative (use 0 to disable).[/red]")
