@@ -196,6 +196,17 @@ def convert(
             "cache (only a voice or text change invalidates it)."
         ),
     ),
+    keep_cache: bool = typer.Option(
+        False, "--keep-cache",
+        help=(
+            "Keep the resume cache after a fully successful run. By default the "
+            "cache is deleted once every chunk is synthesized AND all output "
+            "file(s) are written — it only exists to resume interrupted runs — so "
+            "re-converting the same book afterwards starts from scratch. Pass this "
+            "to preserve it (e.g. if you expect to re-run with tweaks). An "
+            "interrupted or failed run always keeps the cache regardless."
+        ),
+    ),
     concurrency: int = typer.Option(
         3, "--concurrency", "-c",
         help=(
@@ -383,6 +394,7 @@ def convert(
             client_factory=client_factory,
             fallback_factory=fallback_factory,
             resume=not no_resume,
+            cleanup_cache=not keep_cache,
             concurrency=concurrency,
             rpm=rpm,
             console=console,

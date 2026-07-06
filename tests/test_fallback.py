@@ -266,8 +266,11 @@ def test_pipeline_fallback_fingerprints_with_active_config(
         model="stepaudio-2.5-tts", voice="lively-girl",
     )
 
+    # cleanup_cache=False: this test inspects the on-disk cache fingerprints after
+    # the run, so keep them (a successful run prunes its cache by default).
     result = pipeline.run_pipeline(
-        src, out_dir, stepfun_cfg, max_chars=1000, fallback_factory=fallback_factory
+        src, out_dir, stepfun_cfg, max_chars=1000, fallback_factory=fallback_factory,
+        cleanup_cache=False,
     )
 
     chunks = result.chunks

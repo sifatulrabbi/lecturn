@@ -529,6 +529,32 @@ def test_convert_local_explicit_fallback_reenables_openrouter(tmp_path, monkeypa
     assert fallback.config.voice == OPENROUTER_DEFAULT_VOICE
 
 
+def test_convert_keep_cache_flag_wiring(tmp_path, monkeypatch):
+    """--keep-cache maps to cleanup_cache=False; default maps to True."""
+
+    monkeypatch.setenv("STEPFUN_API_KEY", "sk-step-dummy")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-dummy")  # for the fallback build
+    captured = _capture_run_pipeline(monkeypatch)
+
+    book = tmp_path / "book.md"
+    book.write_text("# T\n\nSome text to narrate here.\n", "utf-8")
+
+    # Default: cleanup enabled.
+    result = runner.invoke(
+        app, ["convert", str(book), "-y", "--output", str(tmp_path / "o")]
+    )
+    assert result.exit_code == 0
+    assert captured["cleanup_cache"] is True
+
+    # --keep-cache disables cleanup.
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "-y", "--keep-cache", "--output", str(tmp_path / "o2")],
+    )
+    assert result.exit_code == 0
+    assert captured["cleanup_cache"] is False
+
+
 def test_convert_missing_stepfun_key_exits_1(tmp_path, monkeypatch):
     for var in ("STEPFUN_API_KEY", "STEPFUN_STEP_PLAN_API_KEY"):
         monkeypatch.delenv(var, raising=False)

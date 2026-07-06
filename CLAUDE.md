@@ -112,6 +112,14 @@ exercise the real counting path inject a fake encoding instead of downloading.
   so don't gate on decoded length). `--no-resume` forces a full regenerate. Don't
   regress to non-atomic writes, size-only cache checks, or a model/provider-keyed
   fingerprint.
+- On a **fully successful** run (every chunk synthesized AND all output files
+  written) the resume cache is deleted automatically — scoped to the run's
+  tracked `chunk_files` paths (`active_config`-at-dispatch, so post-fallback
+  chunks use the fallback voice), then the cache dir and its `.audiobook_cache`
+  parent are removed **only if empty**; never a wholesale tree removal.
+  `--keep-cache` (CLI) / `cleanup_cache=False` (library) disables it. Any
+  failure or interrupt leaves the cache for resume; cleanup errors only warn.
+  Don't make cleanup fire on partial success or key it on the primary config.
 - Keep secrets out of code — read the key from the environment.
 
 ## Conventions

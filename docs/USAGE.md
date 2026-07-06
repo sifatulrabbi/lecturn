@@ -89,6 +89,7 @@ lecturn convert INPUT_FILE [OPTIONS]
 | `--max-chars` | `1000` | Max characters per chunk. StepFun's hard cap is 1000 and cannot be exceeded (applied to both providers). |
 | `--base-url` | *(per provider)* | Override the provider's API base URL (StepFun `https://api.stepfun.ai/v1`, OpenRouter `https://openrouter.ai/api/v1`, local `http://127.0.0.1:8880/v1`). |
 | `--no-resume` | off | Ignore all cached audio and re-synthesize every chunk from scratch. |
+| `--keep-cache` | off | Keep the resume cache after a **fully successful** run. By default the cache is deleted once every chunk is synthesized *and* all output file(s) are written (it only exists to resume interrupted runs), so re-converting the same book afterwards starts from scratch. An interrupted or failed run always keeps the cache regardless. |
 | `--dry-run` | off | Load + clean + chunk only; print stats and cost estimate. **No API calls.** |
 | `-y`, `--yes` | off | Skip the cost-estimate confirmation prompt. |
 
@@ -370,6 +371,14 @@ Runs are resumable by design:
     silently reused.
 - Cache files are validated as real MP3s on reuse; corrupt/empty ones are
   re-synthesized rather than trusted.
+- **A fully successful run deletes its own cache automatically.** Once every
+  chunk is synthesized *and* every output file is written, the resume cache has
+  done its job, so `lecturn` removes it (this run's chunk files, plus the
+  `.audiobook_cache` directory if nothing else remains). Any interrupt or failure
+  leaves the cache in place so you can resume. Pass `--keep-cache` to preserve it
+  even on success — handy if you plan to re-run the same book with tweaks. Note:
+  **re-converting the same book after a cleaned-up successful run re-synthesizes
+  from scratch** (there is nothing left to resume from).
 
 ```bash
 # Start a long run:
@@ -383,13 +392,18 @@ lecturn convert bigbook.pdf --concurrency 5 --rpm 10
 # Start completely fresh (ignore the cache):
 lecturn convert bigbook.pdf --no-resume
 
+# Keep the cache even after a successful run (default is to delete it):
+lecturn convert bigbook.pdf --keep-cache
+
 # Clear the cache manually to reclaim disk:
 rm -rf output/.audiobook_cache
 ```
 
-> Because the cache is keyed by content, switching `--voice` or `--model`
-> mid-project leaves the old chunks on disk (unused). Delete
-> `output/.audiobook_cache` if you want to reclaim that space.
+> A successful run cleans up its own cache by default, so there's usually nothing
+> left to delete. But switching `--voice` or `--model` mid-project, using
+> `--keep-cache`, or stopping a run early can leave old/partial chunks on disk
+> (the cache is keyed by content). Delete `output/.audiobook_cache` if you want to
+> reclaim that space.
 
 ---
 

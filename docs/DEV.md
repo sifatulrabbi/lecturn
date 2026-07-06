@@ -107,9 +107,11 @@ Coverage highlights:
 - **Pipeline** — end-to-end; resume (skip cached), `--no-resume`, fingerprint
   invalidation on voice change, cache reuse across model switch, corrupt-cache
   rejection, concurrency is bounded, the RPM rate limiter, and the sequential
-  (`concurrency=1`) guarantee. The OpenRouter and local `client_factory` seams
-  and their cross-run cache hits (`test_pipeline_openrouter.py`,
-  `test_pipeline_local.py`).
+  (`concurrency=1`) guarantee. Cache cleanup on full success (removed on success;
+  kept via `cleanup_cache=False`; a failed run leaves it; an interrupted run's
+  cache is reused by a later successful resume, which then removes it). The
+  OpenRouter and local `client_factory` seams and their cross-run cache hits
+  (`test_pipeline_openrouter.py`, `test_pipeline_local.py`).
 - **CLI** — argument validation, dry-run, catalogue commands (grouped + the
   `--provider` filter), per-provider defaults, version, the credential/factory
   wiring (with `run_pipeline` stubbed), `_resolve_fallback`, and `_format_price`.
@@ -219,6 +221,22 @@ everything is shared:
   `client.active_config` at dispatch, so post-fallback chunks are keyed on the
   fallback voice. A voice or text change invalidates stale audio; `--no-resume`
   forces a full regenerate. Files are validated as real MP3s before reuse.
+- **Cache cleanup on complete success** — after `run_pipeline` finishes with
+  every chunk synthesized AND every output file written (i.e. `assembler.assemble`
+  returned without raising), it deletes this run's resume cache. Scoped narrowly
+  and safely: it removes only the chunk files this run actually used/wrote — the
+  values of the `chunk_files` map, which are the `active_config`-at-dispatch
+  fingerprint paths, so post-fallback chunks are keyed on the fallback voice
+  (never recomputed from the primary config) — then `rmdir`s the cache dir and its
+  `.audiobook_cache` parent **only while empty**. A cache dir shared with another
+  book/voice keeps its other content; there is **no** wholesale tree removal
+  (`_cleanup_cache` / `_rmdir_if_empty` in `pipeline.py`). Any exception, partial
+  failure, or interrupt skips cleanup and leaves the cache intact so `--resume`
+  still works, and cleanup failures (e.g. permission errors) only warn — never
+  failing an already-produced audiobook. Disabled by `cleanup_cache=False`
+  (`run_pipeline`) / `--keep-cache` (CLI); the library default is `True`, matching
+  the CLI (cleanup on). Don't make cleanup fire on partial success, key it on the
+  primary config, or delete a cache dir wholesale.
 - **Tiered error handling** in `tts.py`:
   - `429` / timeout / `5xx` → retry with exponential backoff (honours
     `Retry-After`).

@@ -51,6 +51,8 @@ DEFAULT_CONCURRENCY: int = 1
 MAX_USEFUL_CONCURRENCY: int = 5
 # Requests-per-minute ceiling honoured by the throttle (StepFun per-model: 10).
 DEFAULT_RPM: int = 10
+# Name of the per-book resume-cache directory created under the output dir.
+_CACHE_DIRNAME: str = ".audiobook_cache"
 
 
 @dataclass
@@ -110,6 +112,7 @@ def run_pipeline(
     fallback_factory: Callable[[], _BaseTTSClient] | None = None,
     cache_dir: Path | None = None,
     resume: bool = True,
+    cleanup_cache: bool = True,
     concurrency: int = DEFAULT_CONCURRENCY,
     rpm: int = DEFAULT_RPM,
     console: Console | None = None,
@@ -129,6 +132,12 @@ def run_pipeline(
     client. Because the switch changes the voice mid-book, each chunk's cache
     fingerprint is derived from ``client.active_config`` at dispatch time, not
     from ``config`` — the cache always reflects what actually spoke each chunk.
+
+    ``cleanup_cache`` (default ``True``) deletes this run's resume cache once the
+    pipeline completes *fully* — every chunk synthesized AND every output file
+    written. Any exception, partial failure, or interrupt leaves the cache intact
+    so ``resume`` still works. Pass ``cleanup_cache=False`` (the CLI's
+    ``--keep-cache``) to preserve it; the library default matches the CLI default.
     """
 
     console = console or Console()
@@ -141,7 +150,7 @@ def run_pipeline(
             "No narratable text was produced from the input after cleaning."
         )
 
-    cache_dir = cache_dir or (output_dir / ".audiobook_cache" / cleaned.slug)
+    cache_dir = cache_dir or (output_dir / _CACHE_DIRNAME / cleaned.slug)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     if client_factory is None:
@@ -170,6 +179,16 @@ def run_pipeline(
         output_dir,
         split_by_chapter=split_by_chapter,
     )
+
+    # A fully successful run (every chunk synthesized above AND every output file
+    # written by assemble) makes the resume cache dead weight — drop it unless the
+    # caller opted to keep it. Only reached because ``assemble`` returned without
+    # raising, so any earlier exception/partial failure/interrupt skips this and
+    # leaves the cache for ``resume``.
+    if cleanup_cache and assembly.output_files and all(
+        p.exists() for p in assembly.output_files
+    ):
+        _cleanup_cache(cache_dir, chunk_files, console)
 
     # Cost reflects the model actually used (may be the fallback).
     estimated = estimate_cost(client.stats.characters, client.active_model)
@@ -207,6 +226,53 @@ def _chunk_fingerprint(config: TTSConfig, text: str) -> str:
 def _chunk_cache_path(cache_dir: Path, chunk: Chunk, config: TTSConfig) -> Path:
     fp = _chunk_fingerprint(config, chunk.text)
     return cache_dir / f"chunk_{chunk.index:05d}_{fp}.mp3"
+
+
+def _rmdir_if_empty(directory: Path) -> None:
+    """Remove ``directory`` only if it exists and is empty; otherwise leave it.
+
+    A non-empty directory (a cache shared with another book/voice) or one that is
+    already gone is a normal, expected outcome here — not an error to surface.
+    """
+
+    try:
+        directory.rmdir()  # succeeds only on an empty dir — exactly our guard
+    except OSError:
+        pass  # not empty, or already removed — leave it in place
+
+
+def _cleanup_cache(
+    cache_dir: Path, chunk_files: dict[int, Path], console: Console
+) -> None:
+    """Delete this run's resume cache after a fully successful pipeline.
+
+    Scoped deliberately narrowly. It removes ONLY the chunk files this run
+    actually used or wrote — the values of ``chunk_files``, which are the exact
+    fingerprinted paths taken from ``client.active_config`` at dispatch, so
+    post-fallback chunks are keyed on the fallback voice (never recomputed from
+    the primary config). It then removes the cache directory and its
+    ``.audiobook_cache`` parent, but *only while each is empty*, so a cache dir
+    shared with another book or voice keeps that other content. It never removes
+    a directory tree wholesale.
+
+    Cleanup failures never abort the run: the audiobook is already produced, so a
+    leftover cache is merely wasted disk. A permission (or other OS) error while
+    unlinking is reported as a note and swallowed.
+    """
+
+    try:
+        for path in set(chunk_files.values()):
+            path.unlink(missing_ok=True)
+        _rmdir_if_empty(cache_dir)
+        parent = cache_dir.parent
+        if parent.name == _CACHE_DIRNAME:
+            _rmdir_if_empty(parent)
+    except OSError as exc:
+        console.print(
+            f"[yellow]Note:[/yellow] could not remove the resume cache under "
+            f"{cache_dir} ({exc}). The audiobook is complete; delete it by hand "
+            "to reclaim the disk."
+        )
 
 
 # Minimum plausible size for a real chunk MP3. StepFun chunks are hundreds of KB;

@@ -92,8 +92,11 @@ def test_resume_hits_cache_across_runs(tmp_path, stub_network):
     out_dir = tmp_path / "out"
     cfg = _config()
 
+    # cleanup_cache=False: keep the first run's cache so the second run can hit
+    # it (a successful run now prunes its own cache by default).
     first = pipeline.run_pipeline(
-        src, out_dir, cfg, max_chars=1000, client_factory=_factory
+        src, out_dir, cfg, max_chars=1000, client_factory=_factory,
+        cleanup_cache=False,
     )
     n = len(first.chunks)
     assert stub_network["requests"] == n
