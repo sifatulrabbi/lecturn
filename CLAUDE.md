@@ -2,8 +2,9 @@
 
 `lecturn` (package `textbook_audiobook`) is a Python 3.12+ CLI that converts
 textbooks (PDF/EPUB/TXT/MD) into narrated MP3 audiobooks via a TTS provider —
-StepFun (default) or OpenRouter/Kokoro (`--provider openrouter`). Managed with
-`uv`.
+StepFun (default), OpenRouter/Kokoro (`--provider openrouter`), or a self-hosted
+local Kokoro server (`--provider local`, free/offline; server app lives in
+`server/` with its own uv environment). Managed with `uv`.
 
 Human docs: [docs/SETUP.md](docs/SETUP.md) · [docs/USAGE.md](docs/USAGE.md) ·
 [docs/DEV.md](docs/DEV.md). Read `docs/DEV.md` for architecture and invariants
@@ -64,6 +65,26 @@ exercise the real counting path inject a fake encoding instead of downloading.
   `OpenRouterTTSClient._check_input_limits` (via `tokens.count_tokens`) — inert
   under the 1000-char chunk cap, but keep it correct.
 
+## Local provider (`--provider local`)
+
+- Talks to any OpenAI-compatible Kokoro server at `LOCAL_TTS_BASE_URL`
+  (default `http://127.0.0.1:8880/v1`) — ours in `server/`, or community ones
+  (remsky/Kokoro-FastAPI, mlx-audio). Model id `kokoro`, voice `af_heart`,
+  same Kokoro voice catalogue and 4096-token guard as OpenRouter.
+- **No API key**: `LocalConfig.from_env` never raises `MissingApiKeyError`; it
+  defaults the key to the placeholder `"local"` (the OpenAI SDK needs a
+  non-empty string). Optional `LOCAL_TTS_API_KEY` overrides it.
+- **Local primary defaults to NO fallback** (`--fallback-model none`
+  semantics) — a dead local server must not silently start spending OpenRouter
+  money. An explicit `--fallback-model` re-enables the OpenRouter fallback.
+- Local synthesis is free (no paid API), but the "ask before live runs" rule
+  above still covers StepFun/OpenRouter — including a local run's *explicit*
+  fallback, which can spend real money if it fires.
+- The `server/` app is a **separate uv project** (`requires-python <3.13`
+  because `kokoro` 0.9.4 pins it; torch stays out of lecturn's root env).
+  Its tests are offline: `cd server && uv sync --extra dev && uv run pytest`.
+  First real synthesis downloads ~327 MB of weights from HF Hub.
+
 ## Cross-provider fallback
 
 - On a fallback-eligible failure (quota/unknown-model) the run switches, **once
@@ -73,7 +94,8 @@ exercise the real counting path inject a fake encoding instead of downloading.
   fallback; a StepFun-only run needs no `OPENROUTER_API_KEY` until the fallback
   actually fires, at which point a missing key surfaces the original error plus a
   skip note. `--fallback-model none` disables it; an OpenRouter primary's default
-  fallback equals its model and is a no-op.
+  fallback equals its model and is a no-op. A **local** primary defaults to no
+  fallback at all (see the local-provider section above).
 
 ## Invariants not to break
 

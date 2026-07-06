@@ -15,7 +15,8 @@ usage after this, see [USAGE.md](USAGE.md).
   - Windows: `winget install Gyan.FFmpeg` (or `choco install ffmpeg`)
 - A **TTS provider API key** — a **StepFun** key (default provider) and/or an
   **OpenRouter** key (for `--provider openrouter`, Kokoro-82M). Only needed for
-  real synthesis, not for `--dry-run` / `list-*`.
+  real synthesis, not for `--dry-run` / `list-*`. The third provider,
+  `--provider local` (a self-hosted Kokoro server), needs **no key at all**.
 
 Check ffmpeg is available:
 
@@ -100,6 +101,32 @@ is a cheap open-weight voice model (~$0.62 / 1M chars).
 | --- | --- |
 | `OPENROUTER_API_KEY` | Your OpenRouter API key. Also used for the automatic StepFun→Kokoro fallback (only when it fires; `--fallback-model none` opts out). |
 | `OPENROUTER_BASE_URL` | Optional API base URL override (default `https://openrouter.ai/api/v1`). |
+
+### Local Kokoro server (`--provider local`)
+
+Run Kokoro-82M on your own hardware and point `lecturn` at it — **no API key
+required**, and every request is free (you pay only for your own compute). It
+works with any OpenAI-compatible Kokoro server: the bundled one (see
+[`server/README.md`](../server/README.md) — added by the local-server slice, so
+it may not exist in your checkout yet) or a community server such as
+[Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI).
+
+```bash
+# Start your Kokoro server on port 8880, then:
+lecturn convert mybook.pdf --provider local
+```
+
+Both environment variables are **optional**:
+
+| Variable | Purpose |
+| --- | --- |
+| `LOCAL_TTS_BASE_URL` | Override the server URL (default `http://127.0.0.1:8880/v1`; also settable with `--base-url`). |
+| `LOCAL_TTS_API_KEY` | Only if you front the server with an authenticating proxy. Unset ⇒ a placeholder key is used (the OpenAI SDK requires a non-empty string). |
+
+> The automatic OpenRouter/Kokoro fallback is **disabled by default** for a
+> local primary, so a stopped local server never silently spends OpenRouter
+> money. Pass `--fallback-model hexgrad/kokoro-82m` (and set `OPENROUTER_API_KEY`)
+> to opt in.
 
 > `--dry-run`, `lecturn list-models`, and `lecturn list-voices` work **without**
 > any key — handy for verifying the install before adding credentials.
