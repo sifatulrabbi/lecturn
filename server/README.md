@@ -91,6 +91,10 @@ Kokoro ops fall back to CPU). `GET /health` reports the selected device.
 
 - Output is 24 kHz mono; MP3 is encoded via ffmpeg (real ID3/frame-sync bytes,
   which lecturn's resume cache validates).
+- **Loudness is normalized.** Raw Kokoro output is quiet (it peaks around
+  -9 dBFS), so each request is peak-normalized to about **-1.5 dBFS** before
+  encoding. This is a gain-only step — it brings local audiobooks up to a
+  comparable loudness to the hosted providers without altering the waveform.
 - KPipeline silently **truncates any single unbreakable segment longer than 510
   phoneme tokens**. lecturn chunks input to ≤1000 characters, well under this in
   practice, so v1 does not add its own re-chunker.
