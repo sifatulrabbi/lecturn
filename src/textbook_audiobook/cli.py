@@ -24,7 +24,6 @@ from textbook_audiobook import __version__
 from textbook_audiobook.config import (
     DEFAULT_MODEL,
     DEFAULT_VOICE,
-    ECONOMY_MODEL,
     HARD_CHAR_LIMIT,
     KOKORO_VOICES,
     MODELS,
@@ -35,6 +34,7 @@ from textbook_audiobook.config import (
     MissingApiKeyError,
     OpenRouterConfig,
     StepFunConfig,
+    TTSConfig,
 )
 from textbook_audiobook.loaders import LoaderError, SUPPORTED_EXTENSIONS
 from textbook_audiobook import pipeline
@@ -83,6 +83,30 @@ def _main(
     """Textbook → Audiobook."""
 
 
+def _resolve_fallback(fallback_model: str | None, primary_model: str) -> str | None:
+    """Resolve ``--fallback-model`` to an OpenRouter model id, or ``None``.
+
+    The fallback ALWAYS routes to OpenRouter/Kokoro regardless of the primary
+    provider. Rules:
+
+    - omitted (``None``) → OpenRouter's default model (``hexgrad/kokoro-82m``);
+    - ``"none"`` or empty → ``None`` (fallback disabled);
+    - equal to the primary model → ``None`` (a no-op; e.g. OpenRouter primary
+      with the default Kokoro fallback);
+    - otherwise the given value (interpreted as an OpenRouter model).
+    """
+
+    if fallback_model is None:
+        resolved: str | None = OPENROUTER_DEFAULT_MODEL
+    elif fallback_model.strip().lower() in {"none", ""}:
+        return None
+    else:
+        resolved = fallback_model.strip()
+    if resolved == primary_model:
+        return None
+    return resolved
+
+
 @app.command()
 def convert(
     input_file: Path = typer.Argument(
@@ -115,9 +139,10 @@ def convert(
     fallback_model: Optional[str] = typer.Option(
         None, "--fallback-model",
         help=(
-            "Model to retry with if the primary model is rejected (e.g. quota "
-            "or entitlement). StepFun only — defaults to step-tts-2; OpenRouter "
-            "has no fallback. Pass 'none' to disable."
+            "Model to fall back to (always via OpenRouter/Kokoro) if the primary "
+            "provider rejects a request for quota/entitlement/unknown-model "
+            "reasons. Defaults to hexgrad/kokoro-82m for both providers and needs "
+            "OPENROUTER_API_KEY at fallback time. Pass 'none' to disable."
         ),
     ),
     title: Optional[str] = typer.Option(
@@ -173,9 +198,12 @@ def convert(
     """Convert INPUT_FILE into an audiobook."""
 
     if max_chars > HARD_CHAR_LIMIT:
+        # The 1000-char cap is StepFun's constraint, applied to both providers so
+        # the chunking (and resume cache) stays portable between them.
         console.print(
-            f"[red]--max-chars {max_chars} exceeds StepFun's hard limit of "
-            f"{HARD_CHAR_LIMIT}.[/red]"
+            f"[red]--max-chars {max_chars} exceeds the hard limit of "
+            f"{HARD_CHAR_LIMIT} chars (StepFun's cap, applied to both providers "
+            "for cache portability).[/red]"
         )
         raise typer.Exit(code=2)
     if max_chars <= 0:
@@ -186,10 +214,17 @@ def convert(
         console.print("[red]--concurrency must be at least 1.[/red]")
         raise typer.Exit(code=2)
     if concurrency > MAX_USEFUL_CONCURRENCY:
+        # Cite StepFun's limit only for a StepFun run; OpenRouter's limits differ,
+        # so stay provider-neutral there.
+        limit_note = (
+            f"StepFun's per-model concurrency limit ({MAX_USEFUL_CONCURRENCY})"
+            if provider is Provider.stepfun
+            else f"the default cap ({MAX_USEFUL_CONCURRENCY})"
+        )
         console.print(
             f"[yellow]Warning:[/yellow] --concurrency {concurrency} exceeds "
-            f"StepFun's per-model concurrency limit ({MAX_USEFUL_CONCURRENCY}); "
-            "extra requests will just queue behind the --rpm throttle."
+            f"{limit_note}; extra requests will just queue behind the --rpm "
+            "throttle."
         )
     if rpm < 0:
         console.print("[red]--rpm cannot be negative (use 0 to disable).[/red]")
@@ -197,34 +232,31 @@ def convert(
 
     # --- Resolve per-provider defaults --------------------------------------
     # Each flag defaults to None so we can tell "not given" from an explicit
-    # value and fill in the right provider default here. The StepFun branch
-    # reproduces the pre-provider behaviour byte-for-byte.
+    # value and fill in the right provider default here.
     if provider is Provider.openrouter:
         resolved_model = model if model is not None else OPENROUTER_DEFAULT_MODEL
         resolved_voice = voice if voice is not None else OPENROUTER_DEFAULT_VOICE
-        default_fallback: str | None = None
         known_models = OPENROUTER_MODELS
     else:
         resolved_model = model if model is not None else DEFAULT_MODEL
         resolved_voice = voice if voice is not None else DEFAULT_VOICE
-        default_fallback = ECONOMY_MODEL
         known_models = MODELS
 
-    # Fallback is a StepFun-tier concept: an economy model to retry with. When
-    # not given, use the provider default (StepFun: economy; OpenRouter: none).
-    if fallback_model is None:
-        resolved_fallback = default_fallback
-    elif fallback_model.strip().lower() in {"none", ""}:
-        resolved_fallback = None
-    else:
-        resolved_fallback = fallback_model
-    if resolved_fallback == resolved_model:
-        resolved_fallback = None  # a fallback equal to the primary is a no-op
+    # Fallback ALWAYS routes to OpenRouter/Kokoro, regardless of the primary
+    # provider: default → Kokoro, 'none' → disabled, fallback==primary → no-op
+    # (the case when OpenRouter is already the primary).
+    resolved_fallback = _resolve_fallback(fallback_model, resolved_model)
 
     if resolved_model not in known_models:
         console.print(
             f"[yellow]Warning:[/yellow] '{resolved_model}' is not a known model "
             f"({', '.join(known_models)}). Proceeding anyway."
+        )
+    if resolved_fallback is not None and resolved_fallback not in OPENROUTER_MODELS:
+        console.print(
+            f"[yellow]Warning:[/yellow] fallback model '{resolved_fallback}' is "
+            f"not a known OpenRouter model ({', '.join(OPENROUTER_MODELS)}). "
+            "Proceeding anyway."
         )
 
     # --- Plan (no API calls) ------------------------------------------------
@@ -271,17 +303,26 @@ def convert(
         raise typer.Exit(code=1)
 
     # --- Run ----------------------------------------------------------------
-    # StepFun uses the pipeline's default client factory (unchanged path);
-    # OpenRouter supplies its own client via the slice-1 client_factory seam.
-    # ``fallback_model`` is only consulted by the default (StepFun) factory.
+    # Primary client factory: StepFun uses the pipeline's default (None);
+    # OpenRouter supplies its own. The factory takes the resolved config so the
+    # pipeline never has to trust the caller to keep config and client in sync.
     if provider is Provider.openrouter:
-        def _make_client() -> OpenRouterTTSClient:
-            return OpenRouterTTSClient(
-                config=config, fallback_model=resolved_fallback
-            )
+        def _make_client(cfg: TTSConfig) -> OpenRouterTTSClient:
+            return OpenRouterTTSClient(config=cfg)
         client_factory = _make_client
     else:
         client_factory = None
+
+    # Fallback ALWAYS goes to OpenRouter/Kokoro (voice af_heart), built lazily at
+    # fallback time so a StepFun-only run never needs OPENROUTER_API_KEY upfront.
+    # A missing key when the fallback actually triggers surfaces the original
+    # error plus a skip note (handled by FallbackTTSClient).
+    fallback_factory = None
+    if resolved_fallback is not None:
+        def _make_fallback() -> OpenRouterTTSClient:
+            fb_config = OpenRouterConfig.from_env(model=resolved_fallback)
+            return OpenRouterTTSClient(config=fb_config)
+        fallback_factory = _make_fallback
 
     try:
         result = pipeline.run_pipeline(
@@ -292,8 +333,8 @@ def convert(
             author=author,
             max_chars=max_chars,
             split_by_chapter=split_by_chapter,
-            fallback_model=resolved_fallback,
             client_factory=client_factory,
+            fallback_factory=fallback_factory,
             resume=not no_resume,
             concurrency=concurrency,
             rpm=rpm,

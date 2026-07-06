@@ -5,8 +5,10 @@ OpenRouter (Kokoro-82M). Each has its own base URL, API-key env var, model
 pricing, and voice catalogue, but both speak the same ``POST /audio/speech``
 shape so a single transport (the OpenAI SDK) drives both.
 
-Secrets are read from the environment only — never hard-coded. See PLAN.md
-("API Key") for the accepted environment variables.
+Secrets are read from the environment only — never hard-coded. The accepted
+variables are ``STEPFUN_API_KEY`` (or ``STEPFUN_STEP_PLAN_API_KEY``) /
+``STEPFUN_BASE_URL`` for StepFun and ``OPENROUTER_API_KEY`` /
+``OPENROUTER_BASE_URL`` for OpenRouter — see docs/SETUP.md.
 """
 
 from __future__ import annotations
@@ -50,6 +52,9 @@ class ModelInfo:
     # USD per 10,000 characters (PLAN.md "Pricing").
     price_per_10k_chars: float
     description: str
+    # Maximum input tokens the model accepts per request, or None if the model
+    # imposes no (relevant) token cap. Enforced by the client's input guard.
+    max_input_tokens: int | None = None
 
 
 # Confirmed models and pricing from PLAN.md.
@@ -136,6 +141,9 @@ OPENROUTER_MODELS: dict[str, ModelInfo] = {
         name="hexgrad/kokoro-82m",
         price_per_10k_chars=0.0062,
         description="Kokoro-82M — lightweight open-weight TTS (via OpenRouter)",
+        # Kokoro accepts up to 4096 input tokens per request. The client enforces
+        # this with a safety margin; StepFun models have no token cap (None).
+        max_input_tokens=4096,
     ),
 }
 
@@ -268,7 +276,11 @@ TTSConfig = StepFunConfig | OpenRouterConfig
 
 
 class MissingApiKeyError(RuntimeError):
-    """Raised when no usable StepFun API key is present in the environment."""
+    """Raised when no usable API key is present for the selected provider.
+
+    Both ``StepFunConfig.from_env`` and ``OpenRouterConfig.from_env`` raise it;
+    the message names the specific environment variable that is missing.
+    """
 
 
 def resolve_api_key() -> str | None:

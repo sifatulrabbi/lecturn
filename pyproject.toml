@@ -21,6 +21,10 @@ dependencies = [
     "mutagen>=1.47",
     "typer>=0.12",
     "rich>=13.7",
+    # Token counting for the provider input-size guard (tokens.py). tiktoken
+    # downloads encoding files on first use; the code falls back to a heuristic
+    # offline so the test suite stays network-free.
+    "tiktoken>=0.13.0",
 ]
 
 [project.scripts]

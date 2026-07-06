@@ -14,6 +14,23 @@ import io
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _offline_tokenizer(monkeypatch):
+    """Keep the suite network-free: never let tiktoken download an encoding.
+
+    ``tokens.count_tokens`` lazily fetches a tiktoken encoding on first use,
+    which hits the network. Force the offline heuristic for every test (and
+    clear any cached encoder). Tests that want the real tiktoken code path
+    monkeypatch ``_load_tiktoken_encoding`` themselves with a fake encoding,
+    which overrides this.
+    """
+
+    from textbook_audiobook import tokens
+
+    monkeypatch.setattr(tokens, "_cached_encoder", None)
+    monkeypatch.setattr(tokens, "_load_tiktoken_encoding", lambda: None)
+
+
 def _silent_mp3(duration_ms: int) -> bytes:
     """Return real MP3-encoded bytes for ``duration_ms`` of silence."""
 

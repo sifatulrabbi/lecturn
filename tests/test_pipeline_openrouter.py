@@ -52,8 +52,10 @@ def _config() -> OpenRouterConfig:
     )
 
 
-def _factory(config: OpenRouterConfig):
-    return lambda: OpenRouterTTSClient(config=config)
+def _factory(cfg):
+    # The run_pipeline seam now passes the config to the factory, so the client
+    # can never drift from the config the cache is fingerprinted against.
+    return OpenRouterTTSClient(config=cfg)
 
 
 def _write_book(tmp_path):
@@ -73,7 +75,7 @@ def test_full_pipeline_via_openrouter_seam(tmp_path, stub_network, mp3_duration_
         cfg,
         max_chars=1000,
         split_by_chapter=False,
-        client_factory=_factory(cfg),
+        client_factory=_factory,
     )
 
     assert len(result.assembly.output_files) == 1
@@ -91,13 +93,13 @@ def test_resume_hits_cache_across_runs(tmp_path, stub_network):
     cfg = _config()
 
     first = pipeline.run_pipeline(
-        src, out_dir, cfg, max_chars=1000, client_factory=_factory(cfg)
+        src, out_dir, cfg, max_chars=1000, client_factory=_factory
     )
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
     # Second run reuses every cached chunk — nothing re-synthesized/re-billed.
     pipeline.run_pipeline(
-        src, out_dir, cfg, max_chars=1000, resume=True, client_factory=_factory(cfg)
+        src, out_dir, cfg, max_chars=1000, resume=True, client_factory=_factory
     )
     assert stub_network["requests"] == n

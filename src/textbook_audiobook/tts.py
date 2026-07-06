@@ -20,10 +20,21 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
+from typing import Callable, ClassVar
 
-from textbook_audiobook.config import HARD_CHAR_LIMIT, TTSConfig
+from textbook_audiobook.config import (
+    HARD_CHAR_LIMIT,
+    OPENROUTER_MODELS,
+    MissingApiKeyError,
+    TTSConfig,
+)
 from textbook_audiobook.models import Chunk
+from textbook_audiobook.tokens import count_tokens
+
+# Fraction of a model's token ceiling we allow through, leaving headroom for the
+# fact that we approximate token counts (no public Kokoro tokenizer). For
+# Kokoro's 4096-token cap this rejects above ~3891 tokens.
+_TOKEN_LIMIT_SAFETY: float = 0.95
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -55,7 +66,16 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
 
 
 class TTSError(RuntimeError):
-    """Raised when synthesis fails irrecoverably."""
+    """Raised when synthesis fails irrecoverably.
+
+    ``fallback_eligible`` marks a failure that switching to a *different provider*
+    might recover (quota/unknown-model) versus one it cannot (bad key/voice). The
+    :class:`FallbackTTSClient` reads it to decide whether to switch providers.
+    """
+
+    def __init__(self, message: str, *, fallback_eligible: bool = False) -> None:
+        super().__init__(message)
+        self.fallback_eligible = fallback_eligible
 
 
 @dataclass
@@ -74,12 +94,17 @@ class _BaseTTSClient:
     """Provider-agnostic TTS client.
 
     Holds all the transport machinery shared by every provider: the retry/backoff
-    loop, ``Retry-After`` handling, automatic model fallback, atomic cache writes,
-    OpenAI-SDK error mapping, and thread-safe stats. Providers subclass this and
-    override :meth:`_explain` to give account-specific guidance; the config is
-    duck-typed (only ``.api_key`` / ``.base_url`` / ``.model`` / ``.voice`` /
-    ``.response_format`` are used), so any :data:`~textbook_audiobook.config.TTSConfig`
-    works. Not instantiated directly — use a provider subclass.
+    loop, ``Retry-After`` handling, atomic cache writes, OpenAI-SDK error mapping,
+    and thread-safe stats. Providers subclass this and override :meth:`_explain`
+    to give account-specific guidance; the config is duck-typed (only ``.api_key``
+    / ``.base_url`` / ``.model`` / ``.voice`` / ``.response_format`` are used), so
+    any :data:`~textbook_audiobook.config.TTSConfig` works. Not instantiated
+    directly — use a provider subclass.
+
+    A single client speaks exactly one provider/model/voice. Cross-provider
+    fallback (StepFun → OpenRouter/Kokoro on a quota outage) lives one level up in
+    :class:`FallbackTTSClient`, which owns a primary and a lazily-built fallback
+    client; this class no longer swaps models internally.
     """
 
     # Human-readable provider name used in error messages; subclasses override.
@@ -89,27 +114,29 @@ class _BaseTTSClient:
     max_retries: int = 5
     base_backoff: float = 1.0
     max_backoff: float = 60.0
-    # If the primary model fails with an entitlement/model error, automatically
-    # retry the whole document with this economy model. Set to None to disable.
-    fallback_model: str | None = None
     stats: SynthesisStats = field(default_factory=SynthesisStats)
     _client: object | None = field(default=None, init=False, repr=False)
-    # The model actually in use; switches to fallback_model after a fallback.
-    _active_model: str = field(default="", init=False, repr=False)
-    # Guards mutable shared state (stats + _active_model) so a single client can
-    # be driven from several worker threads concurrently (see pipeline
-    # --concurrency). The network call itself is made through the OpenAI client,
-    # which is safe for concurrent use.
+    # Guards mutable shared state (stats) so a single client can be driven from
+    # several worker threads concurrently (see pipeline --concurrency). The
+    # network call itself is made through the OpenAI client, which is safe for
+    # concurrent use. FallbackTTSClient reassigns this to a shared lock so a
+    # primary and fallback client serialise their stats updates during a switch.
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._client = self._build_client()
-        self._active_model = self.config.model
 
     @property
     def active_model(self) -> str:
-        with self._lock:
-            return self._active_model or self.config.model
+        """The model this client synthesizes with (its config's model)."""
+
+        return self.config.model
+
+    @property
+    def active_config(self) -> TTSConfig:
+        """The config this client synthesizes with (used for cache fingerprints)."""
+
+        return self.config
 
     def _build_client(self):
         try:
@@ -135,9 +162,10 @@ class _BaseTTSClient:
     def synthesize_text(self, text: str, out_path: Path) -> Path:
         """Synthesize raw ``text`` to ``out_path``.
 
-        Retries transient failures with backoff. On a permanent
-        entitlement/model error with the primary model, automatically falls
-        back to ``fallback_model`` (if configured) and retries once more.
+        Retries transient failures with backoff. A permanent error raises a
+        :class:`TTSError` carrying ``fallback_eligible`` so a wrapping
+        :class:`FallbackTTSClient` can decide whether a provider switch is worth
+        trying — this client never swaps model or provider itself.
         """
 
         if not text.strip():
@@ -145,35 +173,20 @@ class _BaseTTSClient:
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with self._lock:
-            active_model = self._active_model
+        model = self.config.model
+
+        # Reject a chunk that would overrun the model's input token limit before
+        # spending a call. No-op for providers without a token cap.
+        self._check_input_limits(text, model)
 
         try:
-            return self._attempt_with_retries(text, out_path, active_model)
-        except _FatalError as exc:
-            can_fallback = (
-                exc.fallback_eligible
-                and self.fallback_model is not None
-                and self.fallback_model != active_model
-            )
-            if not can_fallback:
-                with self._lock:
-                    self.stats.failures += 1
-                raise TTSError(self._explain(exc)) from (exc.__cause__ or exc)
-
-        # Fall back to the economy model and retry the whole document from here.
-        # Under concurrency, several threads may hit the dead primary at once;
-        # flipping to the same fallback model repeatedly is idempotent.
-        with self._lock:
-            self.stats.fallbacks += 1
-            self._active_model = self.fallback_model  # type: ignore[assignment]
-            active_model = self._active_model
-        try:
-            return self._attempt_with_retries(text, out_path, active_model)
+            return self._attempt_with_retries(text, out_path, model)
         except _FatalError as exc:
             with self._lock:
                 self.stats.failures += 1
-            raise TTSError(self._explain(exc)) from (exc.__cause__ or exc)
+            raise TTSError(
+                self._explain(exc), fallback_eligible=exc.fallback_eligible
+            ) from (exc.__cause__ or exc)
 
     def _attempt_with_retries(
         self, text: str, out_path: Path, model: str
@@ -231,6 +244,14 @@ class _BaseTTSClient:
 
         return f"TTS request failed: {exc}"
 
+    def _check_input_limits(self, text: str, model: str) -> None:
+        """Validate ``text`` against ``model``'s input limits before a request.
+
+        Provider hook: the base does nothing (StepFun imposes no token cap).
+        Providers with a token ceiling (e.g. OpenRouter/Kokoro) override this to
+        reject an over-limit chunk with a clear :class:`TTSError`.
+        """
+
     def _request_audio(self, text: str, model: str) -> bytes:
         """Make one API call and return the complete audio payload as bytes."""
 
@@ -273,7 +294,7 @@ class _BaseTTSClient:
             raise _FatalError(str(exc), category="model", fallback_eligible=True) from exc
         except (PermissionDeniedError, APIStatusError) as exc:
             # Quota (402), entitlement (403), and other status errors. These may
-            # be model-specific, so a fallback to the economy model is worth a try.
+            # be model/provider-specific, so a provider fallback is worth a try.
             category = "quota" if _is_quota_error(exc) else "model"
             raise _FatalError(str(exc), category=category, fallback_eligible=True) from exc
 
@@ -302,9 +323,9 @@ class _BaseTTSClient:
 class StepFunTTSClient(_BaseTTSClient):
     """TTS client for StepFun (``https://api.stepfun.ai/v1``).
 
-    Behaviour is identical to the pre-refactor client; only the provider-specific
-    error guidance lives here. Fallback to an economy model is a StepFun concept,
-    so ``fallback_model`` stays available (default off).
+    Only the provider-specific error guidance lives here; the transport is the
+    shared base. Cross-provider fallback (to OpenRouter/Kokoro on a quota outage)
+    is orchestrated by :class:`FallbackTTSClient`, not this client.
     """
 
     provider_label: ClassVar[str] = "StepFun"
@@ -346,14 +367,35 @@ class StepFunTTSClient(_BaseTTSClient):
 class OpenRouterTTSClient(_BaseTTSClient):
     """TTS client for OpenRouter (``https://openrouter.ai/api/v1``, Kokoro-82M).
 
-    Same transport as StepFun; only the error guidance differs. Model fallback is
-    a StepFun-tier concept, so it defaults off here (``fallback_model=None``) —
-    Kokoro is the single OpenRouter model — though a caller may still set one.
+    Same transport as StepFun; only the error guidance and the token-limit guard
+    differ. OpenRouter is also the target every :class:`FallbackTTSClient` falls
+    back to, so this client doubles as the fallback synthesizer.
     """
 
     provider_label: ClassVar[str] = "OpenRouter"
 
-    fallback_model: str | None = None
+    def _check_input_limits(self, text: str, model: str) -> None:
+        """Reject a chunk whose token count would overrun the model's cap.
+
+        Kokoro accepts ``max_input_tokens`` (4096) per request. We count tokens
+        with a tiktoken approximation (Kokoro publishes no tokenizer) and reject
+        above a safety margin. NOTE: with ``HARD_CHAR_LIMIT`` (1000) a chunk is
+        at most ~1000 chars ≈ 300 tokens, so this can never fire today — it makes
+        the constraint explicit and future-proofs against a raised char cap or a
+        lower-limit model.
+        """
+
+        info = OPENROUTER_MODELS.get(model)
+        if info is None or info.max_input_tokens is None:
+            return
+        ceiling = int(info.max_input_tokens * _TOKEN_LIMIT_SAFETY)
+        n_tokens = count_tokens(text)
+        if n_tokens > ceiling:
+            raise TTSError(
+                f"Chunk is ~{n_tokens} tokens, over {model}'s safe input limit "
+                f"of {ceiling} (model max {info.max_input_tokens}). "
+                "Lower --max-chars to produce smaller chunks."
+            )
 
     @staticmethod
     def _explain(exc: "_FatalError") -> str:
@@ -386,6 +428,105 @@ class OpenRouterTTSClient(_BaseTTSClient):
         return f"OpenRouter request failed: {exc}"
 
 
+@dataclass
+class FallbackTTSClient:
+    """Drives a primary TTS client, switching once to an OpenRouter fallback.
+
+    Wraps a primary :class:`_BaseTTSClient`. On the first *fallback-eligible*
+    failure it lazily builds the fallback client (always OpenRouter/Kokoro) via
+    ``fallback_factory`` and routes every subsequent chunk through it —
+    **one-way, for the rest of the run**. It exposes the surface the pipeline
+    drives (:meth:`synthesize_chunk`, :attr:`stats`, :attr:`active_model`,
+    :attr:`active_config`), so it is a drop-in for a bare client.
+
+    Thread-safety: the primary and fallback clients share this wrapper's lock and
+    ``stats``, so their counter updates never race during the switch window (an
+    in-flight primary request finishing while a fallback request runs). The
+    switch itself happens exactly once even when several workers hit the dead
+    primary simultaneously — the losers observe the already-active fallback and
+    retry their own chunk on it.
+
+    ``fallback_factory`` is called lazily, so a run whose primary never fails
+    never needs the fallback provider's credentials. If it raises
+    :class:`~textbook_audiobook.config.MissingApiKeyError` when the fallback is
+    finally needed, the original primary error is surfaced with a note that the
+    fallback was skipped. Pass ``fallback_factory=None`` to disable fallback.
+    """
+
+    primary: _BaseTTSClient
+    fallback_factory: Callable[[], _BaseTTSClient] | None = None
+    stats: SynthesisStats = field(default_factory=SynthesisStats)
+    _active: _BaseTTSClient = field(init=False, repr=False)
+    _switched: bool = field(default=False, init=False, repr=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
+    def __post_init__(self) -> None:
+        # Share the wrapper's lock and stats with the primary so both are already
+        # aggregated and serialised before any fallback is built.
+        self.primary._lock = self._lock
+        self.primary.stats = self.stats
+        self._active = self.primary
+
+    @property
+    def active_model(self) -> str:
+        with self._lock:
+            return self._active.active_model
+
+    @property
+    def active_config(self) -> TTSConfig:
+        with self._lock:
+            return self._active.config
+
+    def synthesize_chunk(self, chunk: Chunk, out_path: Path) -> Path:
+        return self._run(lambda client: client.synthesize_chunk(chunk, out_path))
+
+    def synthesize_text(self, text: str, out_path: Path) -> Path:
+        return self._run(lambda client: client.synthesize_text(text, out_path))
+
+    def _run(self, action: Callable[[_BaseTTSClient], Path]) -> Path:
+        with self._lock:
+            active = self._active
+            already_switched = self._switched
+        try:
+            return action(active)
+        except TTSError as exc:
+            if (
+                already_switched
+                or self.fallback_factory is None
+                or not getattr(exc, "fallback_eligible", False)
+            ):
+                raise
+            fallback = self._switch(exc)
+            # Retry this chunk on the fallback. If it also fails, that error
+            # propagates — the switch is one-way, we never loop.
+            return action(fallback)
+
+    def _switch(self, original: TTSError) -> _BaseTTSClient:
+        """Build (once) and activate the fallback client. Thread-safe."""
+
+        with self._lock:
+            if self._switched:
+                return self._active  # another worker already switched
+            assert self.fallback_factory is not None
+            try:
+                fallback = self.fallback_factory()
+            except MissingApiKeyError as exc:
+                raise TTSError(
+                    f"{original} Automatic fallback to OpenRouter (Kokoro) was "
+                    "skipped because OPENROUTER_API_KEY is not set."
+                ) from exc
+            # Share this wrapper's lock and stats so the fallback's counters
+            # aggregate and serialise with the primary's during the switch.
+            fallback._lock = self._lock
+            fallback.stats = self.stats
+            self._active = fallback
+            self._switched = True
+            self.stats.fallbacks += 1
+            return fallback
+
+
 class _RetryableError(Exception):
     """Internal marker for transient errors worth retrying."""
 
@@ -397,9 +538,9 @@ class _RetryableError(Exception):
 class _FatalError(Exception):
     """Internal marker for permanent errors that retrying cannot fix.
 
-    ``fallback_eligible`` signals whether switching to the economy model might
-    succeed (e.g. quota/entitlement scoped to a specific model) versus errors a
-    model swap can never resolve (e.g. a bad API key).
+    ``fallback_eligible`` signals whether switching to a different provider might
+    succeed (e.g. quota/entitlement scoped to a model) versus errors a provider
+    swap can never resolve (e.g. a bad API key or a rejected voice).
     """
 
     def __init__(

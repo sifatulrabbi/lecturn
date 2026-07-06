@@ -38,7 +38,11 @@ from textbook_audiobook.assembler import AssemblyResult
 from textbook_audiobook.config import TTSConfig, estimate_cost
 from textbook_audiobook.loaders import load_document
 from textbook_audiobook.models import Chunk, Document
-from textbook_audiobook.tts import _BaseTTSClient, StepFunTTSClient
+from textbook_audiobook.tts import (
+    FallbackTTSClient,
+    StepFunTTSClient,
+    _BaseTTSClient,
+)
 
 # Sensible default for the synth stage. The library default is 1 (sequential);
 # the CLI raises it. Concurrency above the account's per-model limit only trips
@@ -102,8 +106,8 @@ def run_pipeline(
     author: str | None = None,
     max_chars: int,
     split_by_chapter: bool = False,
-    fallback_model: str | None = None,
-    client_factory: Callable[[], _BaseTTSClient] | None = None,
+    client_factory: Callable[[TTSConfig], _BaseTTSClient] | None = None,
+    fallback_factory: Callable[[], _BaseTTSClient] | None = None,
     cache_dir: Path | None = None,
     resume: bool = True,
     concurrency: int = DEFAULT_CONCURRENCY,
@@ -112,14 +116,19 @@ def run_pipeline(
 ) -> PipelineResult:
     """Execute the full pipeline and return a :class:`PipelineResult`.
 
-    The TTS provider is chosen by ``client_factory``: a zero-arg callable that
-    returns a built :class:`~textbook_audiobook.tts._BaseTTSClient`. When omitted,
-    the pipeline builds a :class:`~textbook_audiobook.tts.StepFunTTSClient` from
-    ``config`` and ``fallback_model`` — preserving the original StepFun-only
-    behaviour so existing callers need no change. Callers selecting another
-    provider (e.g. OpenRouter) pass a factory and still pass the matching
-    ``config`` (used for the resume-cache fingerprint and cost estimate).
-    ``fallback_model`` is only consulted by the default StepFun factory.
+    The primary TTS client is built by ``client_factory``, a callable taking the
+    ``config`` and returning a built
+    :class:`~textbook_audiobook.tts._BaseTTSClient` — so the client's config can
+    never drift from the one used to fingerprint the cache. When omitted, the
+    pipeline builds a :class:`~textbook_audiobook.tts.StepFunTTSClient` from
+    ``config`` (the default StepFun path).
+
+    ``fallback_factory`` (when given) is wrapped around the primary in a
+    :class:`~textbook_audiobook.tts.FallbackTTSClient`: on a fallback-eligible
+    failure the run switches, once and one-way, to that (OpenRouter/Kokoro)
+    client. Because the switch changes the voice mid-book, each chunk's cache
+    fingerprint is derived from ``client.active_config`` at dispatch time, not
+    from ``config`` — the cache always reflects what actually spoke each chunk.
     """
 
     console = console or Console()
@@ -136,18 +145,21 @@ def run_pipeline(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     if client_factory is None:
-        client = StepFunTTSClient(config=config, fallback_model=fallback_model)
+        primary = StepFunTTSClient(config=config)
     else:
-        client = client_factory()
+        primary = client_factory(config)
+    client = FallbackTTSClient(primary=primary, fallback_factory=fallback_factory)
+
     chunk_files = _synthesize_all(
-        chunks, client, cache_dir, config,
+        chunks, client, cache_dir,
         resume=resume, concurrency=concurrency, rpm=rpm, console=console,
     )
 
     if client.stats.fallbacks:
         console.print(
             f"[yellow]Note:[/yellow] fell back from '{config.model}' to "
-            f"'{client.active_model}' after the primary model was rejected."
+            f"'{client.active_model}' (OpenRouter/Kokoro) after the primary "
+            "provider was rejected."
         )
 
     console.print("[bold]Assembling audio…[/bold]")
@@ -173,12 +185,15 @@ def _chunk_fingerprint(config: TTSConfig, text: str) -> str:
     """Short hash identifying a cached chunk by narrator + content.
 
     Deliberately keyed on the ``voice``, response ``format``, and chunk text —
-    NOT the model. The model is a quality/cost tier, and a single book can
-    legitimately span models (e.g. the automatic premium->economy fallback on a
-    quota outage), so switching ``--model`` must not invalidate the cache. Use
-    ``--no-resume`` to force a full regeneration. Changing the voice or the source
-    text (including via ``--max-chars``) does change the fingerprint, so that
-    stale audio is never silently reused.
+    NOT the model and NOT the provider. A single book can legitimately span
+    models *and providers* (e.g. the automatic StepFun→OpenRouter/Kokoro fallback
+    on a quota outage), so switching ``--model`` must not invalidate the cache;
+    Kokoro voice IDs are structurally disjoint from StepFun's, so a voice-keyed
+    cache is already provider-safe. Callers pass the config that *actually*
+    synthesizes each chunk (``client.active_config``), so after a fallback the
+    remaining chunks are keyed on the fallback voice. Use ``--no-resume`` to force
+    a full regeneration. Changing the voice or the source text (including via
+    ``--max-chars``) does change the fingerprint, so stale audio is never reused.
     """
 
     h = hashlib.sha1()
@@ -241,9 +256,8 @@ def _make_progress(console: Console) -> Progress:
 
 def _synthesize_all(
     chunks: list[Chunk],
-    client: _BaseTTSClient,
+    client: FallbackTTSClient,
     cache_dir: Path,
-    config: TTSConfig,
     *,
     resume: bool,
     concurrency: int = DEFAULT_CONCURRENCY,
@@ -255,6 +269,12 @@ def _synthesize_all(
     Resume: chunks whose fingerprinted cache file already exists and is a valid
     MP3 are reused (not re-synthesized, not re-billed).
 
+    Each chunk's cache path is fingerprinted from ``client.active_config`` at
+    dispatch time, so if the run switches to the fallback provider mid-book the
+    remaining chunks are keyed on the fallback voice (finding-4 fix). Accepted
+    edge: the one chunk *during* which the switch happens is stored under the
+    pre-switch fingerprint.
+
     Concurrency: ``concurrency`` requests run at once (``1`` = strictly
     sequential, the safe default), throttled to ``rpm`` request-starts per
     minute. Concurrency changes wall-clock time only — total characters (and
@@ -264,13 +284,13 @@ def _synthesize_all(
     """
 
     chunk_files: dict[int, Path] = {}
-    todo: list[tuple[Chunk, Path]] = []
+    todo: list[Chunk] = []
     for chunk in chunks:
-        out_path = _chunk_cache_path(cache_dir, chunk, config)
+        out_path = _chunk_cache_path(cache_dir, chunk, client.active_config)
         if resume and out_path.exists() and _is_playable_mp3(out_path):
             chunk_files[chunk.index] = out_path  # reuse cached audio
         else:
-            todo.append((chunk, out_path))
+            todo.append(chunk)
 
     already_done = len(chunks) - len(todo)
     with _make_progress(console) as progress:
@@ -282,28 +302,47 @@ def _synthesize_all(
 
         limiter = _RateLimiter(rpm)
         if concurrency <= 1:
-            for chunk, out_path in todo:
+            for chunk in todo:
                 limiter.acquire()
-                client.synthesize_chunk(chunk, out_path)
-                chunk_files[chunk.index] = out_path
+                index, out_path = _synthesize_one(client, chunk, cache_dir, resume)
+                chunk_files[index] = out_path
                 progress.advance(task)
         else:
             _synthesize_concurrent(
-                todo, chunk_files, client, limiter, progress, task,
-                concurrency=concurrency,
+                todo, chunk_files, client, cache_dir, limiter, progress, task,
+                resume=resume, concurrency=concurrency,
             )
 
     return chunk_files
 
 
+def _synthesize_one(
+    client: FallbackTTSClient, chunk: Chunk, cache_dir: Path, resume: bool
+) -> tuple[int, Path]:
+    """Synthesize (or cache-hit) one chunk, keyed by the client's CURRENT config.
+
+    The active config is read at dispatch, so after a fallback the path reflects
+    the fallback voice — and a chunk already cached under that (switched) config
+    from an earlier run is reused instead of re-billed.
+    """
+
+    out_path = _chunk_cache_path(cache_dir, chunk, client.active_config)
+    if resume and out_path.exists() and _is_playable_mp3(out_path):
+        return chunk.index, out_path
+    client.synthesize_chunk(chunk, out_path)
+    return chunk.index, out_path
+
+
 def _synthesize_concurrent(
-    todo: list[tuple[Chunk, Path]],
+    todo: list[Chunk],
     chunk_files: dict[int, Path],
-    client: _BaseTTSClient,
+    client: FallbackTTSClient,
+    cache_dir: Path,
     limiter: _RateLimiter,
     progress: Progress,
     task,
     *,
+    resume: bool,
     concurrency: int,
 ) -> None:
     """Run the pending chunks through a bounded thread pool + RPM throttle.
@@ -314,13 +353,12 @@ def _synthesize_concurrent(
     already in flight are allowed to finish so their audio is cached for resume.
     """
 
-    def work(chunk: Chunk, out_path: Path) -> tuple[int, Path]:
+    def work(chunk: Chunk) -> tuple[int, Path]:
         limiter.acquire()
-        client.synthesize_chunk(chunk, out_path)
-        return chunk.index, out_path
+        return _synthesize_one(client, chunk, cache_dir, resume)
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        futures = {executor.submit(work, c, p): c for c, p in todo}
+        futures = {executor.submit(work, c): c for c in todo}
         try:
             for future in as_completed(futures):
                 index, out_path = future.result()

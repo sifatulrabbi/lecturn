@@ -65,8 +65,11 @@ For a dev setup that includes test dependencies, see [DEV.md](DEV.md).
 
 ## Configure credentials
 
-Keys are read from the environment — never hard-code or commit them. You only
-need the key for the provider you use (`--provider`, default `stepfun`).
+Keys are read from the environment — never hard-code or commit them. You need the
+key for the provider you use (`--provider`, default `stepfun`). A StepFun run can
+also fall back to OpenRouter/Kokoro on a quota outage, so set `OPENROUTER_API_KEY`
+too if you want that safety net (it's read only when the fallback fires; opt out
+with `--fallback-model none`).
 
 ### StepFun (default provider)
 
@@ -95,7 +98,7 @@ is a cheap open-weight voice model (~$0.62 / 1M chars).
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENROUTER_API_KEY` | Your OpenRouter API key. |
+| `OPENROUTER_API_KEY` | Your OpenRouter API key. Also used for the automatic StepFun→Kokoro fallback (only when it fires; `--fallback-model none` opts out). |
 | `OPENROUTER_BASE_URL` | Optional API base URL override (default `https://openrouter.ai/api/v1`). |
 
 > `--dry-run`, `lecturn list-models`, and `lecturn list-voices` work **without**
