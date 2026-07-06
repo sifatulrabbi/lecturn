@@ -16,14 +16,22 @@ from textbook_audiobook.cli import _format_price, _resolve_fallback, app
 from textbook_audiobook.config import (
     DEFAULT_MODEL,
     DEFAULT_VOICE,
+    LOCAL_BASE_URL_DEFAULT,
+    LOCAL_DEFAULT_MODEL,
+    LOCAL_DEFAULT_VOICE,
     MODELS,
     OPENROUTER_DEFAULT_MODEL,
     OPENROUTER_DEFAULT_VOICE,
+    LocalConfig,
     OpenRouterConfig,
     StepFunConfig,
     VOICES,
 )
-from textbook_audiobook.tts import OpenRouterTTSClient, StepFunTTSClient
+from textbook_audiobook.tts import (
+    LocalTTSClient,
+    OpenRouterTTSClient,
+    StepFunTTSClient,
+)
 
 runner = CliRunner()
 
@@ -205,6 +213,79 @@ def test_list_voices_default_shows_both_providers():
     assert OPENROUTER_DEFAULT_VOICE in result.stdout     # Kokoro group
 
 
+# -- local provider ---------------------------------------------------------
+
+
+def test_local_dry_run_needs_no_key(tmp_path, monkeypatch):
+    """`--dry-run --provider local` works with NO API keys set at all."""
+
+    # Prove no key is required by clearing every provider key from the env,
+    # including the optional local ones.
+    for var in (
+        "STEPFUN_API_KEY", "STEPFUN_STEP_PLAN_API_KEY", "OPENROUTER_API_KEY",
+        "LOCAL_TTS_API_KEY", "LOCAL_TTS_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    book = tmp_path / "book.txt"
+    book.write_text(
+        "Local Kokoro Book\n\nHello world. A short paragraph to narrate.\n",
+        "utf-8",
+    )
+    out = tmp_path / "out"
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "--dry-run", "--provider", "local",
+         "--output", str(out)],
+    )
+    assert result.exit_code == 0
+    assert "Dry run" in result.stdout
+    # Reports the local provider and its default model + voice.
+    assert "local" in result.stdout
+    assert LOCAL_DEFAULT_MODEL in result.stdout          # kokoro
+    assert LOCAL_DEFAULT_VOICE in result.stdout          # af_heart
+    assert not out.exists() or not any(out.glob("*.mp3"))
+
+
+def test_local_unknown_model_checks_its_own_catalogue(tmp_path):
+    book = tmp_path / "book.md"
+    book.write_text("# T\n\nText here.\n", "utf-8")
+    # A StepFun model is 'unknown' when the provider is local.
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "--dry-run", "--provider", "local",
+         "--model", DEFAULT_MODEL],
+    )
+    assert result.exit_code == 0
+    assert "not a known model" in result.stdout
+
+
+def test_list_models_shows_local_group():
+    result = runner.invoke(app, ["list-models"])
+    assert result.exit_code == 0
+    assert "Local (Kokoro) models" in result.stdout
+    assert LOCAL_DEFAULT_MODEL in result.stdout          # kokoro
+
+
+def test_list_models_provider_filter_local():
+    result = runner.invoke(app, ["list-models", "--provider", "local"])
+    assert result.exit_code == 0
+    assert "Local (Kokoro) models" in result.stdout
+    assert "$0.0000" in result.stdout                    # self-hosted => free
+    # Other providers' groups are filtered out.
+    assert "StepFun models" not in result.stdout
+    assert "OpenRouter models" not in result.stdout
+
+
+def test_list_voices_provider_filter_local():
+    result = runner.invoke(app, ["list-voices", "--provider", "local"])
+    assert result.exit_code == 0
+    assert "Local (Kokoro) voices" in result.stdout
+    assert LOCAL_DEFAULT_VOICE in result.stdout          # af_heart
+    # StepFun voices are filtered out.
+    assert "lively-girl" not in result.stdout
+
+
 # -- provider validation ----------------------------------------------------
 
 
@@ -254,6 +335,23 @@ def test_resolve_fallback_explicit_value_passes_through():
     assert _resolve_fallback("  vendor/x  ", DEFAULT_MODEL) == "vendor/x"
 
 
+def test_resolve_fallback_local_default_is_none():
+    # A local primary defaults the fallback to disabled (default=None): a dead
+    # local server must not silently spend OpenRouter money.
+    assert _resolve_fallback(None, LOCAL_DEFAULT_MODEL, default=None) is None
+
+
+def test_resolve_fallback_local_explicit_reenables():
+    # An explicit --fallback-model re-enables the OpenRouter fallback even when
+    # the local primary's default is None.
+    assert (
+        _resolve_fallback(
+            OPENROUTER_DEFAULT_MODEL, LOCAL_DEFAULT_MODEL, default=None
+        )
+        == OPENROUTER_DEFAULT_MODEL
+    )
+
+
 # -- _format_price precision ------------------------------------------------
 
 
@@ -293,9 +391,10 @@ def _capture_run_pipeline(monkeypatch) -> dict:
         return _FAKE_RESULT
 
     monkeypatch.setattr(cli.pipeline, "run_pipeline", fake_run_pipeline)
-    # Building either client must not construct a real OpenAI client.
+    # Building any client must not construct a real OpenAI client.
     monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
     monkeypatch.setattr(OpenRouterTTSClient, "_build_client", lambda self: object())
+    monkeypatch.setattr(LocalTTSClient, "_build_client", lambda self: object())
     return captured
 
 
@@ -345,6 +444,115 @@ def test_convert_openrouter_wiring(tmp_path, monkeypatch):
     assert primary.config.voice == "bf_emma"
     # Default fallback == primary Kokoro model -> no-op (no second client built).
     assert captured["fallback_factory"] is None
+
+
+def test_convert_local_wiring_defaults(tmp_path, monkeypatch):
+    # No LOCAL_TTS_* set: LocalConfig uses the placeholder key + localhost, and
+    # the local primary defaults the fallback to disabled.
+    for var in (
+        "STEPFUN_API_KEY", "STEPFUN_STEP_PLAN_API_KEY", "OPENROUTER_API_KEY",
+        "LOCAL_TTS_API_KEY", "LOCAL_TTS_BASE_URL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    captured = _capture_run_pipeline(monkeypatch)
+
+    book = tmp_path / "book.md"
+    book.write_text("# T\n\nSome text to narrate here.\n", "utf-8")
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "-y", "--provider", "local",
+         "--output", str(tmp_path / "o")],
+    )
+    assert result.exit_code == 0
+
+    cfg = captured["config"]
+    assert isinstance(cfg, LocalConfig)
+    assert cfg.model == LOCAL_DEFAULT_MODEL
+    assert cfg.voice == LOCAL_DEFAULT_VOICE
+    assert cfg.api_key == "local"                        # placeholder, no key set
+    assert cfg.base_url == LOCAL_BASE_URL_DEFAULT
+    # Local supplies a config-taking primary factory.
+    primary = captured["client_factory"](cfg)
+    assert isinstance(primary, LocalTTSClient)
+    # A dead local server must not silently spend OpenRouter money: no fallback.
+    assert captured["fallback_factory"] is None
+
+
+def test_convert_local_base_url_override_via_flag(tmp_path, monkeypatch):
+    monkeypatch.delenv("LOCAL_TTS_BASE_URL", raising=False)
+    captured = _capture_run_pipeline(monkeypatch)
+
+    book = tmp_path / "book.md"
+    book.write_text("# T\n\nSome text to narrate here.\n", "utf-8")
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "-y", "--provider", "local",
+         "--base-url", "http://10.0.0.9:8880/v1", "--output", str(tmp_path / "o")],
+    )
+    assert result.exit_code == 0
+    assert captured["config"].base_url == "http://10.0.0.9:8880/v1"
+
+
+def test_convert_local_base_url_override_via_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_TTS_BASE_URL", "http://kokoro.lan:8880/v1")
+    captured = _capture_run_pipeline(monkeypatch)
+
+    book = tmp_path / "book.md"
+    book.write_text("# T\n\nSome text to narrate here.\n", "utf-8")
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "-y", "--provider", "local",
+         "--output", str(tmp_path / "o")],
+    )
+    assert result.exit_code == 0
+    assert captured["config"].base_url == "http://kokoro.lan:8880/v1"
+
+
+def test_convert_local_explicit_fallback_reenables_openrouter(tmp_path, monkeypatch):
+    # An explicit --fallback-model on a local primary re-enables the OpenRouter
+    # fallback (built lazily; needs OPENROUTER_API_KEY at fallback time).
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-dummy")
+    captured = _capture_run_pipeline(monkeypatch)
+
+    book = tmp_path / "book.md"
+    book.write_text("# T\n\nSome text to narrate here.\n", "utf-8")
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "-y", "--provider", "local",
+         "--fallback-model", OPENROUTER_DEFAULT_MODEL, "--output", str(tmp_path / "o")],
+    )
+    assert result.exit_code == 0
+    assert isinstance(captured["config"], LocalConfig)
+    fallback = captured["fallback_factory"]()
+    assert isinstance(fallback, OpenRouterTTSClient)
+    assert fallback.config.model == OPENROUTER_DEFAULT_MODEL
+    assert fallback.config.voice == OPENROUTER_DEFAULT_VOICE
+
+
+def test_convert_keep_cache_flag_wiring(tmp_path, monkeypatch):
+    """--keep-cache maps to cleanup_cache=False; default maps to True."""
+
+    monkeypatch.setenv("STEPFUN_API_KEY", "sk-step-dummy")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-dummy")  # for the fallback build
+    captured = _capture_run_pipeline(monkeypatch)
+
+    book = tmp_path / "book.md"
+    book.write_text("# T\n\nSome text to narrate here.\n", "utf-8")
+
+    # Default: cleanup enabled.
+    result = runner.invoke(
+        app, ["convert", str(book), "-y", "--output", str(tmp_path / "o")]
+    )
+    assert result.exit_code == 0
+    assert captured["cleanup_cache"] is True
+
+    # --keep-cache disables cleanup.
+    result = runner.invoke(
+        app,
+        ["convert", str(book), "-y", "--keep-cache", "--output", str(tmp_path / "o2")],
+    )
+    assert result.exit_code == 0
+    assert captured["cleanup_cache"] is False
 
 
 def test_convert_missing_stepfun_key_exits_1(tmp_path, monkeypatch):

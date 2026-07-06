@@ -1,9 +1,9 @@
-"""End-to-end pipeline tests driving the OpenRouter provider through the seam.
+"""End-to-end pipeline tests driving the local provider through the seam.
 
-Proves ``run_pipeline``'s ``client_factory`` seam works with
-``OpenRouterConfig`` + ``OpenRouterTTSClient``, and that the resume cache — keyed
-on voice+format+text, not provider — hits across runs. The network is stubbed to
-return real MP3 bytes, exactly as the StepFun pipeline tests do.
+Proves ``run_pipeline``'s ``client_factory`` seam works with ``LocalConfig`` +
+``LocalTTSClient``, and that the resume cache — keyed on voice+format+text, not
+provider — hits across runs. The network is stubbed to return real MP3 bytes,
+exactly as the StepFun/OpenRouter pipeline tests do.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from __future__ import annotations
 import pytest
 
 from textbook_audiobook import pipeline
-from textbook_audiobook.config import OpenRouterConfig
-from textbook_audiobook.tts import OpenRouterTTSClient
+from textbook_audiobook.config import LocalConfig
+from textbook_audiobook.tts import LocalTTSClient
 
 
 BOOK = """# A Small Book
@@ -29,33 +29,33 @@ The second chapter, likewise, is short and sweet.
 
 @pytest.fixture
 def stub_network(monkeypatch, mp3_bytes):
-    """Make OpenRouterTTSClient return real MP3 bytes instead of calling the API."""
+    """Make LocalTTSClient return real MP3 bytes instead of calling the server."""
 
     counter = {"requests": 0}
 
-    monkeypatch.setattr(OpenRouterTTSClient, "_build_client", lambda self: object())
+    monkeypatch.setattr(LocalTTSClient, "_build_client", lambda self: object())
 
     def fake_request(self, text, model):
         counter["requests"] += 1
         return mp3_bytes
 
-    monkeypatch.setattr(OpenRouterTTSClient, "_request_audio", fake_request)
+    monkeypatch.setattr(LocalTTSClient, "_request_audio", fake_request)
     return counter
 
 
-def _config() -> OpenRouterConfig:
-    return OpenRouterConfig(
-        api_key="x",
-        base_url="http://x",
-        model="hexgrad/kokoro-82m",
+def _config() -> LocalConfig:
+    return LocalConfig(
+        api_key="local",
+        base_url="http://127.0.0.1:8880/v1",
+        model="kokoro",
         voice="af_heart",
     )
 
 
 def _factory(cfg):
-    # The run_pipeline seam now passes the config to the factory, so the client
-    # can never drift from the config the cache is fingerprinted against.
-    return OpenRouterTTSClient(config=cfg)
+    # The run_pipeline seam passes the config to the factory, so the client can
+    # never drift from the config the cache is fingerprinted against.
+    return LocalTTSClient(config=cfg)
 
 
 def _write_book(tmp_path):
@@ -64,7 +64,7 @@ def _write_book(tmp_path):
     return src
 
 
-def test_full_pipeline_via_openrouter_seam(tmp_path, stub_network, mp3_duration_ms):
+def test_full_pipeline_via_local_seam(tmp_path, stub_network, mp3_duration_ms):
     src = _write_book(tmp_path)
     out_dir = tmp_path / "out"
     cfg = _config()
@@ -82,9 +82,9 @@ def test_full_pipeline_via_openrouter_seam(tmp_path, stub_network, mp3_duration_
     out = result.assembly.output_files[0]
     assert out.exists() and mp3_duration_ms(out) > 0
     assert stub_network["requests"] == len(result.chunks) > 0
-    # Cost is computed from Kokoro pricing ($0.0062 / 10k), so a real book costs
-    # something — proves estimate_cost resolved the OpenRouter model.
-    assert result.estimated_cost_usd > 0
+    # Self-hosted Kokoro is free ($0.00), so a real book still costs nothing —
+    # proves estimate_cost resolved the local model to an explicit 0.0.
+    assert result.estimated_cost_usd == 0.0
 
 
 def test_resume_hits_cache_across_runs(tmp_path, stub_network):
@@ -101,7 +101,7 @@ def test_resume_hits_cache_across_runs(tmp_path, stub_network):
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
-    # Second run reuses every cached chunk — nothing re-synthesized/re-billed.
+    # Second run reuses every cached chunk — nothing re-synthesized.
     pipeline.run_pipeline(
         src, out_dir, cfg, max_chars=1000, resume=True, client_factory=_factory
     )

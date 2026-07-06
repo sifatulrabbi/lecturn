@@ -1,13 +1,14 @@
 """TTS clients for the supported OpenAI-compatible providers.
 
-Both StepFun and OpenRouter expose the same ``POST /audio/speech`` shape, so the
-transport, retry/backoff, model-fallback, atomic-write, and error-mapping logic
-is shared in :class:`_BaseTTSClient`. Each provider is a thin subclass that only
-supplies human-readable error guidance via ``_explain`` — everything else is
-identical. Uses the OpenAI Python SDK pointed at the provider's base URL, calls
-the endpoint once per chunk, and writes the complete MP3 response to disk (no
-streaming — each call returns a full audio file, see PLAN.md "Response
-Behaviour").
+StepFun, OpenRouter, and the self-hosted ``local`` Kokoro server all expose the
+same ``POST /audio/speech`` shape, so the transport, retry/backoff,
+model-fallback, atomic-write, and error-mapping logic is shared in
+:class:`_BaseTTSClient`. Each provider is a thin subclass that supplies
+human-readable error guidance via ``_explain`` (and, for the Kokoro-based
+providers, a token-input guard) — everything else is identical. Uses the OpenAI
+Python SDK pointed at the provider's base URL, calls the endpoint once per
+chunk, and writes the complete MP3 response to disk (no streaming — each call
+returns a full audio file, see PLAN.md "Response Behaviour").
 
 Transient failures are retried with exponential backoff, honouring
 ``Retry-After`` on rate-limit (429) responses.
@@ -24,6 +25,7 @@ from typing import Callable, ClassVar
 
 from textbook_audiobook.config import (
     HARD_CHAR_LIMIT,
+    LOCAL_MODELS,
     OPENROUTER_MODELS,
     MissingApiKeyError,
     TTSConfig,
@@ -233,13 +235,13 @@ class _BaseTTSClient:
             f"attempt{plural}: {last_exc}"
         ) from last_exc
 
-    @staticmethod
-    def _explain(exc: "_FatalError") -> str:
+    def _explain(self, exc: "_FatalError") -> str:
         """Turn a fatal error into an actionable message.
 
         Provider hook: the generic default is deliberately terse. Each provider
         subclass overrides this with account-specific guidance (quota top-up
-        links, which env var to check, how to list voices).
+        links, which env var to check, how to list voices). Instance method so
+        overrides can reach per-instance state such as the configured base URL.
         """
 
         return f"TTS request failed: {exc}"
@@ -330,8 +332,7 @@ class StepFunTTSClient(_BaseTTSClient):
 
     provider_label: ClassVar[str] = "StepFun"
 
-    @staticmethod
-    def _explain(exc: "_FatalError") -> str:
+    def _explain(self, exc: "_FatalError") -> str:
         """Turn a fatal error into an actionable, StepFun-specific message."""
 
         if exc.category == "quota":
@@ -397,8 +398,7 @@ class OpenRouterTTSClient(_BaseTTSClient):
                 "Lower --max-chars to produce smaller chunks."
             )
 
-    @staticmethod
-    def _explain(exc: "_FatalError") -> str:
+    def _explain(self, exc: "_FatalError") -> str:
         """Turn a fatal error into an actionable, OpenRouter-specific message."""
 
         if exc.category == "quota":
@@ -426,6 +426,86 @@ class OpenRouterTTSClient(_BaseTTSClient):
                 "(e.g. 'hexgrad/kokoro-82m')."
             )
         return f"OpenRouter request failed: {exc}"
+
+
+@dataclass
+class LocalTTSClient(_BaseTTSClient):
+    """TTS client for a self-hosted Kokoro server (default ``127.0.0.1:8880``).
+
+    Structurally a clone of :class:`OpenRouterTTSClient` (same transport, same
+    Kokoro model family, same 4096-token input guard) rather than a subclass of
+    it — the token hook is cloned explicitly so the two providers stay
+    independent. Only the error guidance differs: it is tailored to a
+    self-hosted server and names the configured base URL.
+    """
+
+    provider_label: ClassVar[str] = "Local"
+
+    def _check_input_limits(self, text: str, model: str) -> None:
+        """Reject a chunk whose token count would overrun the model's cap.
+
+        Same guard as :class:`OpenRouterTTSClient`, driven by ``LOCAL_MODELS``
+        (Kokoro's 4096-token ceiling). Cloned rather than inherited so the local
+        provider does not depend on the OpenRouter class. NOTE: with
+        ``HARD_CHAR_LIMIT`` (1000) a chunk stays far under the cap, so this can
+        never fire today — it makes the constraint explicit and future-proofs
+        against a raised char cap or a lower-limit model.
+        """
+
+        info = LOCAL_MODELS.get(model)
+        if info is None or info.max_input_tokens is None:
+            return
+        ceiling = int(info.max_input_tokens * _TOKEN_LIMIT_SAFETY)
+        n_tokens = count_tokens(text)
+        if n_tokens > ceiling:
+            raise TTSError(
+                f"Chunk is ~{n_tokens} tokens, over {model}'s safe input limit "
+                f"of {ceiling} (model max {info.max_input_tokens}). "
+                "Lower --max-chars to produce smaller chunks."
+            )
+
+    def _explain(self, exc: "_FatalError") -> str:
+        """Turn a fatal error into actionable, local-server-specific guidance.
+
+        The messages name the configured base URL — the single most useful thing
+        to check when a self-hosted server misbehaves. Note that a *dead* server
+        surfaces as a connection error, which is retryable and therefore reported
+        by the retry loop's "after N attempts" message, not here; the catch-all
+        branch still points at the server for any other/uncategorised failure.
+        """
+
+        base_url = self.config.base_url
+        if exc.category == "quota":
+            # A self-hosted server should not meter quota; a proxy in front of it
+            # might. Surface the raw error and point at the server.
+            return (
+                f"The local TTS server rejected the request: {exc} "
+                f"That is unusual for a self-hosted server at {base_url} — check "
+                "its logs (see the server/ README)."
+            )
+        if exc.category == "auth":
+            return (
+                f"The local TTS server rejected the credentials: {exc} "
+                "Local servers are usually unauthenticated; if yours needs a key, "
+                "set LOCAL_TTS_API_KEY."
+            )
+        if exc.category == "voice":
+            return (
+                f"The local TTS server rejected the voice: {exc} "
+                "Run `lecturn list-voices --provider local` and pick a valid "
+                "Kokoro voice ID (e.g. 'af_heart')."
+            )
+        if exc.category == "model":
+            return (
+                f"The local TTS server rejected the model: {exc} "
+                f"Check the --model name (default 'kokoro') is one the server at "
+                f"{base_url} serves (see the server/ README)."
+            )
+        return (
+            f"The local TTS request failed: {exc} "
+            f"Is the local TTS server running at {base_url}? "
+            "(see the server/ README)"
+        )
 
 
 @dataclass

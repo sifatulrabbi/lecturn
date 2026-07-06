@@ -1,14 +1,16 @@
 """Configuration and constants for the TTS providers.
 
-Two OpenAI-compatible providers are supported: StepFun (the original) and
-OpenRouter (Kokoro-82M). Each has its own base URL, API-key env var, model
-pricing, and voice catalogue, but both speak the same ``POST /audio/speech``
-shape so a single transport (the OpenAI SDK) drives both.
+Three OpenAI-compatible providers are supported: StepFun (the original),
+OpenRouter (Kokoro-82M), and ``local`` (a self-hosted Kokoro server). Each has
+its own base URL, API-key env var (the local one is optional), model pricing,
+and voice catalogue, but all speak the same ``POST /audio/speech`` shape so a
+single transport (the OpenAI SDK) drives them all.
 
 Secrets are read from the environment only — never hard-coded. The accepted
 variables are ``STEPFUN_API_KEY`` (or ``STEPFUN_STEP_PLAN_API_KEY``) /
-``STEPFUN_BASE_URL`` for StepFun and ``OPENROUTER_API_KEY`` /
-``OPENROUTER_BASE_URL`` for OpenRouter — see docs/SETUP.md.
+``STEPFUN_BASE_URL`` for StepFun, ``OPENROUTER_API_KEY`` /
+``OPENROUTER_BASE_URL`` for OpenRouter, and the optional ``LOCAL_TTS_API_KEY`` /
+``LOCAL_TTS_BASE_URL`` for the local server — see docs/SETUP.md.
 """
 
 from __future__ import annotations
@@ -42,6 +44,18 @@ OPENROUTER_BASE_URL_DEFAULT: str = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL: str = "hexgrad/kokoro-82m"
 # Kokoro's highest-graded voice (US female, grade A in hexgrad's VOICES.md).
 OPENROUTER_DEFAULT_VOICE: str = "af_heart"
+
+# --- Local Kokoro server (self-hosted, OpenAI-compatible) --------------------
+# A third provider for a locally-hosted Kokoro server — ours (see server/) or a
+# community one such as remsky/Kokoro-FastAPI. It serves the same Kokoro model
+# behind the same OpenAI-compatible POST /audio/speech shape, so the same
+# transport is reused; only the base URL, the (optional) key, and the bare model
+# id differ. The default base URL is Kokoro-FastAPI's convention (port 8880).
+LOCAL_BASE_URL_DEFAULT: str = "http://127.0.0.1:8880/v1"
+# Kokoro-FastAPI (and our server) accept the bare model id "kokoro".
+LOCAL_DEFAULT_MODEL: str = "kokoro"
+# Same Kokoro voice catalogue as OpenRouter; af_heart is the grade-A default.
+LOCAL_DEFAULT_VOICE: str = "af_heart"
 
 
 @dataclass(frozen=True)
@@ -147,6 +161,23 @@ OPENROUTER_MODELS: dict[str, ModelInfo] = {
     ),
 }
 
+# The local Kokoro server's catalogue. Only the bare "kokoro" model is offered.
+# The price is a deliberate, explicit $0.00: the model runs on the user's own
+# hardware, so lecturn bills nothing for it. estimate_cost resolves "kokoro"
+# here to an explicit 0.0 rather than treating it as an unknown-model miss.
+# Names cannot collide with StepFun's flat IDs or OpenRouter's ``vendor/model``
+# form — see estimate_cost().
+LOCAL_MODELS: dict[str, ModelInfo] = {
+    "kokoro": ModelInfo(
+        name="kokoro",
+        price_per_10k_chars=0.0,  # self-hosted => free
+        description="Kokoro-82M on a self-hosted server (free; your hardware)",
+        # Same 4096-token Kokoro input ceiling as the OpenRouter model; the
+        # client enforces it with the same safety margin.
+        max_input_tokens=4096,
+    ),
+}
+
 # Kokoro's built-in English voices, keyed by voice ID with a human label and a
 # quality grade taken from hexgrad's VOICES.md. Prefix convention: ``af_``/``am_``
 # = US female/male, ``bf_``/``bm_`` = UK female/male. Kokoro voice IDs cannot
@@ -179,6 +210,13 @@ KOKORO_VOICES: dict[str, str] = {
 
 # Ordered list of Kokoro voice IDs for convenience.
 KNOWN_KOKORO_VOICES: list[str] = list(KOKORO_VOICES)
+
+# The local server serves the same Kokoro model, so it exposes the same voices.
+# Alias the OpenRouter catalogue (do NOT duplicate the table) so list-voices can
+# title it per-provider while there stays a single source of truth. Because the
+# IDs are identical, a chunk cached by one provider is reusable by the other.
+LOCAL_VOICES: dict[str, str] = KOKORO_VOICES
+KNOWN_LOCAL_VOICES: list[str] = KNOWN_KOKORO_VOICES
 
 
 @dataclass
@@ -269,17 +307,71 @@ class OpenRouterConfig:
         )
 
 
+@dataclass
+class LocalConfig:
+    """Resolved runtime configuration for a self-hosted Kokoro server.
+
+    Structurally a clone of :class:`OpenRouterConfig` (same duck-typed
+    ``.model`` / ``.voice`` / ``.response_format`` surface the pipeline relies
+    on), with two differences: the base URL points at localhost, and the API key
+    is optional. Local servers are unauthenticated, but the OpenAI SDK requires
+    a non-empty ``api_key`` string, so ``from_env`` defaults to the placeholder
+    ``"local"`` and — unlike the other two configs — NEVER raises
+    :class:`MissingApiKeyError`.
+    """
+
+    api_key: str
+    base_url: str
+    model: str
+    voice: str
+    # MUST default to (and always send) "mp3": Kokoro servers (like OpenRouter)
+    # default to raw PCM, which would break the pipeline's MP3 magic-byte cache
+    # validation and pydub stitching. Never omit response_format in a request.
+    response_format: str = DEFAULT_RESPONSE_FORMAT
+
+    @classmethod
+    def from_env(
+        cls,
+        *,
+        model: str = LOCAL_DEFAULT_MODEL,
+        voice: str = LOCAL_DEFAULT_VOICE,
+        response_format: str = DEFAULT_RESPONSE_FORMAT,
+        base_url: str | None = None,
+        api_key: str | None = None,
+    ) -> "LocalConfig":
+        # Local servers are typically unauthenticated, but the OpenAI SDK needs a
+        # non-empty api_key. Use LOCAL_TTS_API_KEY if the user set one (e.g. a
+        # reverse proxy in front of the server), else a harmless placeholder.
+        # This NEVER raises MissingApiKeyError — there is no missing-key path.
+        resolved_key = api_key or os.environ.get("LOCAL_TTS_API_KEY") or "local"
+        resolved_base = (
+            base_url
+            or os.environ.get("LOCAL_TTS_BASE_URL")
+            or LOCAL_BASE_URL_DEFAULT
+        )
+        return cls(
+            api_key=resolved_key,
+            base_url=resolved_base,
+            model=model,
+            voice=voice,
+            response_format=response_format,
+        )
+
+
 # The pipeline and transport only touch ``.model`` / ``.voice`` /
-# ``.response_format`` / ``.api_key`` / ``.base_url``, which both configs share.
-# This union is the type used wherever "a config for either provider" is meant.
-TTSConfig = StepFunConfig | OpenRouterConfig
+# ``.response_format`` / ``.api_key`` / ``.base_url``, which all three configs
+# share. This union is the type used wherever "a config for any provider" is
+# meant.
+TTSConfig = StepFunConfig | OpenRouterConfig | LocalConfig
 
 
 class MissingApiKeyError(RuntimeError):
     """Raised when no usable API key is present for the selected provider.
 
-    Both ``StepFunConfig.from_env`` and ``OpenRouterConfig.from_env`` raise it;
-    the message names the specific environment variable that is missing.
+    Raised by ``StepFunConfig.from_env`` and ``OpenRouterConfig.from_env``; the
+    message names the specific environment variable that is missing.
+    ``LocalConfig.from_env`` deliberately never raises it — a local server is
+    unauthenticated, so the key falls back to a placeholder.
     """
 
 
@@ -295,13 +387,14 @@ def resolve_api_key() -> str | None:
 def estimate_cost(char_count: int, model: str) -> float:
     """Estimate USD cost for narrating ``char_count`` characters with ``model``.
 
-    Looks the model up in the StepFun catalogue first, then OpenRouter's. The
-    two catalogues use disjoint naming (StepFun's flat IDs vs OpenRouter's
-    ``vendor/model`` form), so lookup order is immaterial — an unknown model in
-    either still returns 0.0, unchanged.
+    Looks the model up across all three catalogues — StepFun, then OpenRouter,
+    then local. Their naming is disjoint (StepFun's flat IDs, OpenRouter's
+    ``vendor/model`` form, local's bare ``kokoro``), so lookup order is
+    immaterial. The local model resolves to an explicit $0.00 (self-hosted,
+    free); an unknown model in none of them still returns 0.0, unchanged.
     """
 
-    info = MODELS.get(model) or OPENROUTER_MODELS.get(model)
+    info = MODELS.get(model) or OPENROUTER_MODELS.get(model) or LOCAL_MODELS.get(model)
     if info is None:
         return 0.0
     return (char_count / 10_000) * info.price_per_10k_chars

@@ -15,7 +15,7 @@ import pytest
 
 from textbook_audiobook import pipeline
 from textbook_audiobook.config import StepFunConfig
-from textbook_audiobook.tts import StepFunTTSClient
+from textbook_audiobook.tts import StepFunTTSClient, TTSError
 
 
 BOOK = """# The Art of Clear Thinking
@@ -48,6 +48,31 @@ def stub_network(monkeypatch, mp3_bytes):
 
     monkeypatch.setattr(StepFunTTSClient, "_request_audio", fake_request)
     return counter
+
+
+@pytest.fixture
+def stub_network_failing(monkeypatch, mp3_bytes):
+    """Like ``stub_network`` but raises on the ``fail_on``-th synth request.
+
+    Returns state ``{"requests", "fail_on"}``. A plain exception out of
+    ``_request_audio`` is non-retryable (the client's retry loop breaks
+    immediately and raises ``TTSError``), so the run fails fast and
+    deterministically — no backoff sleeps, no fallback (``fallback_eligible``
+    defaults to False and no fallback factory is configured). Set ``fail_on`` to
+    ``None`` to disable failing.
+    """
+
+    state: dict = {"requests": 0, "fail_on": None}
+    monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
+
+    def fake_request(self, text, model):
+        state["requests"] += 1
+        if state["fail_on"] is not None and state["requests"] == state["fail_on"]:
+            raise RuntimeError("simulated synth failure")
+        return mp3_bytes
+
+    monkeypatch.setattr(StepFunTTSClient, "_request_audio", fake_request)
+    return state
 
 
 def _config() -> StepFunConfig:
@@ -117,7 +142,11 @@ def test_resume_skips_cached_chunks(tmp_path, stub_network):
     src = _write_book(tmp_path)
     out_dir = tmp_path / "out"
 
-    first = pipeline.run_pipeline(src, out_dir, _config(), max_chars=1000)
+    # cleanup_cache=False: keep this run's cache so the resume below can hit it
+    # (a successful run now prunes its own cache by default).
+    first = pipeline.run_pipeline(
+        src, out_dir, _config(), max_chars=1000, cleanup_cache=False
+    )
     n_chunks = len(first.chunks)
     assert stub_network["requests"] == n_chunks
 
@@ -223,7 +252,10 @@ def test_resume_rejects_corrupt_cache(tmp_path, stub_network):
 
     src = _write_book(tmp_path)
     out = tmp_path / "out"
-    first = pipeline.run_pipeline(src, out, _config(), max_chars=1000)
+    # cleanup_cache=False: keep the cache so we can corrupt a chunk and resume.
+    first = pipeline.run_pipeline(
+        src, out, _config(), max_chars=1000, cleanup_cache=False
+    )
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
@@ -243,7 +275,9 @@ def test_resume_resynthesizes_when_voice_changes(tmp_path, stub_network):
     src = _write_book(tmp_path)
     out = tmp_path / "out"
     cfg_a = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
-    first = pipeline.run_pipeline(src, out, cfg_a, max_chars=1000)
+    # cleanup_cache=False: keep the voice-A cache so the voice-B run below proves
+    # a voice change invalidates the fingerprint (rather than finding it deleted).
+    first = pipeline.run_pipeline(src, out, cfg_a, max_chars=1000, cleanup_cache=False)
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
@@ -263,7 +297,8 @@ def test_resume_reuses_cache_across_model_switch(tmp_path, stub_network):
     src = _write_book(tmp_path)
     out = tmp_path / "out"
     premium = StepFunConfig(api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="lively-girl")
-    first = pipeline.run_pipeline(src, out, premium, max_chars=1000)
+    # cleanup_cache=False: keep the cache so the model switch below reuses it.
+    first = pipeline.run_pipeline(src, out, premium, max_chars=1000, cleanup_cache=False)
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
@@ -271,6 +306,86 @@ def test_resume_reuses_cache_across_model_switch(tmp_path, stub_network):
     economy = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
     pipeline.run_pipeline(src, out, economy, max_chars=1000, resume=True)
     assert stub_network["requests"] == 0    # same voice+text -> cache reused despite model change
+
+
+# -- cache cleanup on complete success --------------------------------------
+
+
+def test_successful_run_removes_cache(tmp_path, stub_network):
+    """A fully successful run deletes its resume cache (dir removed once empty)."""
+
+    src = _write_book(tmp_path)
+    out = tmp_path / "out"
+
+    result = pipeline.run_pipeline(src, out, _config(), max_chars=1000)
+
+    # Output was written...
+    assert result.assembly.output_files[0].exists()
+    # ...and the cache for this run is gone: no chunk files, and the whole
+    # .audiobook_cache dir was pruned because nothing else lived there.
+    assert not (out / ".audiobook_cache").exists()
+
+
+def test_keep_cache_preserves_cache_on_success(tmp_path, stub_network):
+    """cleanup_cache=False (the CLI's --keep-cache) keeps the cache on success."""
+
+    src = _write_book(tmp_path)
+    out = tmp_path / "out"
+
+    result = pipeline.run_pipeline(
+        src, out, _config(), max_chars=1000, cleanup_cache=False
+    )
+
+    cache = out / ".audiobook_cache" / result.document.slug
+    assert cache.exists()
+    assert list(cache.glob("chunk_*.mp3"))  # cached chunks preserved
+
+
+def test_failed_run_keeps_cache(tmp_path, stub_network_failing):
+    """A mid-run synth failure must leave the cache intact for --resume."""
+
+    src = _write_book_n_chunks(tmp_path, 6)
+    out = tmp_path / "out"
+    stub_network_failing["fail_on"] = 3  # chunks 0,1 cached; chunk 2 fails
+
+    with pytest.raises(TTSError):
+        pipeline.run_pipeline(src, out, _config(), max_chars=1000, concurrency=1)
+
+    cache_root = out / ".audiobook_cache"
+    assert cache_root.exists()
+    cached = list(cache_root.rglob("chunk_*.mp3"))
+    assert len(cached) >= 1  # the completed chunks are still on disk to resume
+
+
+def test_resume_then_cleanup_on_success(tmp_path, stub_network_failing):
+    """Interrupted run keeps cache; a later successful resume then removes it."""
+
+    src = _write_book_n_chunks(tmp_path, 6)
+    out = tmp_path / "out"
+    cache_root = out / ".audiobook_cache"
+
+    # Run 1: interrupted by a synth failure — cleanup never runs (full success is
+    # never reached), so the completed chunks stay cached.
+    stub_network_failing["fail_on"] = 3
+    with pytest.raises(TTSError):
+        pipeline.run_pipeline(src, out, _config(), max_chars=1000, concurrency=1)
+    reused = list(cache_root.rglob("chunk_*.mp3"))
+    assert len(reused) >= 1
+
+    # Run 2: no failure, resume from cache. Cached chunks aren't re-synthesized;
+    # the rest are. On full success the whole cache is then pruned.
+    stub_network_failing["fail_on"] = None
+    stub_network_failing["requests"] = 0
+    result = pipeline.run_pipeline(
+        src, out, _config(), max_chars=1000, concurrency=1, resume=True
+    )
+
+    n_total = len(result.chunks)
+    n_reused = len(reused)
+    assert n_reused >= 1
+    assert n_total - n_reused >= 1                               # some work remained
+    assert stub_network_failing["requests"] == n_total - n_reused  # resumed, not redone
+    assert not cache_root.exists()                              # cleaned after success
 
 
 def test_is_playable_mp3_accepts_id3_prefixed_audio(tmp_path):

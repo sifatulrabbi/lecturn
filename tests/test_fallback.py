@@ -15,6 +15,7 @@ import pytest
 
 from textbook_audiobook import pipeline
 from textbook_audiobook.config import (
+    LocalConfig,
     MissingApiKeyError,
     OpenRouterConfig,
     StepFunConfig,
@@ -23,6 +24,7 @@ from textbook_audiobook.config import (
 from textbook_audiobook.pipeline import _chunk_fingerprint
 from textbook_audiobook.tts import (
     FallbackTTSClient,
+    LocalTTSClient,
     OpenRouterTTSClient,
     StepFunTTSClient,
     TTSError,
@@ -48,6 +50,17 @@ def _openrouter(monkeypatch, req) -> OpenRouterTTSClient:
         model="hexgrad/kokoro-82m", voice="af_heart",
     )
     c = OpenRouterTTSClient(config=cfg, base_backoff=0.001, max_backoff=0.005)
+    c._request_audio = req
+    return c
+
+
+def _local(monkeypatch, req) -> LocalTTSClient:
+    monkeypatch.setattr(LocalTTSClient, "_build_client", lambda self: object())
+    cfg = LocalConfig(
+        api_key="local", base_url="http://127.0.0.1:8880/v1",
+        model="kokoro", voice="af_heart",
+    )
+    c = LocalTTSClient(config=cfg, base_backoff=0.001, max_backoff=0.005)
     c._request_audio = req
     return c
 
@@ -169,6 +182,43 @@ def test_switch_is_exactly_once_under_concurrency(monkeypatch, tmp_path, mp3_byt
     assert all(pipeline._is_playable_mp3(r) for r in results)
 
 
+# -- local primary --------------------------------------------------------
+
+
+def test_local_primary_no_switch_when_fallback_disabled(monkeypatch, tmp_path):
+    # The CLI defaults a local primary to fallback_factory=None, so a dead local
+    # server (fallback-eligible error) must NOT silently switch to OpenRouter.
+    primary = _local(monkeypatch, _quota)
+    wrapper = FallbackTTSClient(primary=primary, fallback_factory=None)
+    with pytest.raises(TTSError) as exc:
+        wrapper.synthesize_text("hi", tmp_path / "a.mp3")
+    assert exc.value.fallback_eligible is True   # eligible, just not acted on
+    assert wrapper.stats.fallbacks == 0
+    assert wrapper.active_model == "kokoro"
+
+
+def test_local_primary_switches_when_fallback_explicit(monkeypatch, tmp_path, mp3_bytes):
+    # An explicit --fallback-model re-enables the OpenRouter fallback even for a
+    # local primary: on an eligible error it switches to OpenRouter/Kokoro.
+    primary = _local(monkeypatch, _quota)
+    built = {"n": 0}
+
+    def fallback_factory():
+        built["n"] += 1
+        return _openrouter(monkeypatch, lambda text, model: mp3_bytes)
+
+    wrapper = FallbackTTSClient(primary=primary, fallback_factory=fallback_factory)
+    assert wrapper.active_model == "kokoro"
+
+    out = wrapper.synthesize_text("hello", tmp_path / "a.mp3")
+    assert pipeline._is_playable_mp3(out)
+    assert built["n"] == 1
+    assert wrapper.stats.fallbacks == 1
+    # After the switch the wrapper reflects the OpenRouter fallback.
+    assert wrapper.active_model == "hexgrad/kokoro-82m"
+    assert wrapper.active_config.voice == "af_heart"
+
+
 # -- pipeline-level cross-provider fallback (finding-4 fix) ------------------
 
 
@@ -216,8 +266,11 @@ def test_pipeline_fallback_fingerprints_with_active_config(
         model="stepaudio-2.5-tts", voice="lively-girl",
     )
 
+    # cleanup_cache=False: this test inspects the on-disk cache fingerprints after
+    # the run, so keep them (a successful run prunes its cache by default).
     result = pipeline.run_pipeline(
-        src, out_dir, stepfun_cfg, max_chars=1000, fallback_factory=fallback_factory
+        src, out_dir, stepfun_cfg, max_chars=1000, fallback_factory=fallback_factory,
+        cleanup_cache=False,
     )
 
     chunks = result.chunks

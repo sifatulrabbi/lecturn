@@ -1,9 +1,10 @@
 # lecturn — Usage Guide
 
 `lecturn` converts a textbook (**PDF, EPUB, plain text, or Markdown**) into a
-narrated MP3 audiobook using a TTS provider — **StepFun** (default) or
-**OpenRouter** (Kokoro-82M), selected with `--provider`. This guide covers every
-command and option with extensive, copy-pasteable examples.
+narrated MP3 audiobook using a TTS provider — **StepFun** (default),
+**OpenRouter** (Kokoro-82M), or **local** (a self-hosted Kokoro server),
+selected with `--provider`. This guide covers every command and option with
+extensive, copy-pasteable examples.
 
 > New here? See [SETUP.md](SETUP.md) to install the `lecturn` command and set
 > your API key first.
@@ -38,9 +39,9 @@ a source checkout without installing, prefix everything with `uv run` — e.g.
 
 ```bash
 lecturn convert INPUT_FILE [OPTIONS]   # convert a book into audio (the main command)
-lecturn list-models                    # show models and pricing (both providers)
-lecturn list-voices                    # show voice catalogues (both providers)
-lecturn list-models --provider openrouter   # filter a catalogue to one provider
+lecturn list-models                    # show models and pricing (all providers)
+lecturn list-voices                    # show voice catalogues (all providers)
+lecturn list-models --provider local   # filter a catalogue to one provider
 lecturn --version                      # print version
 lecturn --help                         # top-level help
 lecturn convert --help                 # full option reference for convert
@@ -76,18 +77,19 @@ lecturn convert INPUT_FILE [OPTIONS]
 | Option | Default | Description |
 | --- | --- | --- |
 | `-o`, `--output` | `output/` | Directory for the output MP3(s). Created if missing. |
-| `--provider` | `stepfun` | TTS provider: `stepfun` or `openrouter` (Kokoro-82M). Selects the API, key, and the defaults for `--model`/`--voice` below. |
-| `-m`, `--model` | *(per provider)* | TTS model. StepFun: `stepaudio-2.5-tts` (best) / `step-tts-2` (economy). OpenRouter: `hexgrad/kokoro-82m`. |
-| `--voice` | *(per provider)* | Voice ID. StepFun default `lively-girl`; OpenRouter default `af_heart`. See [`list-voices`](#choosing-a-voice). |
-| `--fallback-model` | `hexgrad/kokoro-82m` | Model to fall back to — **always via OpenRouter/Kokoro** — if the primary provider rejects a request (quota/entitlement/unknown-model). Same default for both providers; needs `OPENROUTER_API_KEY` at fallback time. `none` disables it. (With OpenRouter as the primary, the default fallback equals the primary model and is a no-op.) |
+| `--provider` | `stepfun` | TTS provider: `stepfun`, `openrouter` (Kokoro-82M), or `local` (self-hosted Kokoro server). Selects the API, key, and the defaults for `--model`/`--voice` below. |
+| `-m`, `--model` | *(per provider)* | TTS model. StepFun: `stepaudio-2.5-tts` (best) / `step-tts-2` (economy). OpenRouter: `hexgrad/kokoro-82m`. Local: `kokoro`. |
+| `--voice` | *(per provider)* | Voice ID. StepFun default `lively-girl`; OpenRouter and local default `af_heart`. See [`list-voices`](#choosing-a-voice). |
+| `--fallback-model` | *(per provider)* | Model to fall back to — **always via OpenRouter/Kokoro** — if the primary provider rejects a request (quota/entitlement/unknown-model). Defaults to `hexgrad/kokoro-82m` for `stepfun`/`openrouter` (needs `OPENROUTER_API_KEY` at fallback time); **defaults to disabled for `local`** so a stopped local server never silently spends OpenRouter money. `none` disables it. (With OpenRouter as the primary, the default fallback equals the primary model and is a no-op.) |
 | `--title` | *(from file/metadata)* | Override the book title (used in ID3 tags and output filename). |
 | `--author` | *(from metadata or "Unknown")* | Override the author (used in the artist tag). |
 | `--split-by-chapter` | off | Emit one MP3 per chapter (with track numbers) instead of a single file. |
 | `-c`, `--concurrency` | `3` | Chunks synthesized in parallel. **Faster at the same cost.** Keep ≤ your account's per-model limit (StepFun: 5); `1` = strictly sequential. |
 | `--rpm` | `10` | Throttle: max requests started per minute. Set to your per-model RPM limit (StepFun: 10). `0` disables the throttle. |
 | `--max-chars` | `1000` | Max characters per chunk. StepFun's hard cap is 1000 and cannot be exceeded (applied to both providers). |
-| `--base-url` | *(per provider)* | Override the provider's API base URL (StepFun `https://api.stepfun.ai/v1`, OpenRouter `https://openrouter.ai/api/v1`). |
+| `--base-url` | *(per provider)* | Override the provider's API base URL (StepFun `https://api.stepfun.ai/v1`, OpenRouter `https://openrouter.ai/api/v1`, local `http://127.0.0.1:8880/v1`). |
 | `--no-resume` | off | Ignore all cached audio and re-synthesize every chunk from scratch. |
+| `--keep-cache` | off | Keep the resume cache after a **fully successful** run. By default the cache is deleted once every chunk is synthesized *and* all output file(s) are written (it only exists to resume interrupted runs), so re-converting the same book afterwards starts from scratch. An interrupted or failed run always keeps the cache regardless. |
 | `--dry-run` | off | Load + clean + chunk only; print stats and cost estimate. **No API calls.** |
 | `-y`, `--yes` | off | Skip the cost-estimate confirmation prompt. |
 
@@ -148,17 +150,41 @@ lecturn convert mybook.epub --output ./out/clear-thinking/
 lecturn convert mybook.pdf --provider stepfun           # default (StepFun)
 lecturn convert mybook.pdf --provider openrouter        # Kokoro-82M via OpenRouter
 lecturn convert mybook.pdf --provider openrouter --dry-run   # free plan + kokoro cost
+lecturn convert mybook.pdf --provider local             # self-hosted Kokoro server
 ```
 
 `--provider` selects the API, the key it reads (`STEPFUN_API_KEY` vs.
-`OPENROUTER_API_KEY`), and the per-provider defaults for `--model` and `--voice`.
-OpenRouter narrates with **Kokoro-82M** — a cheap open-weight model (~$0.62 / 1M
-chars, i.e. `$0.0062 / 10k`) with its own voice IDs (`af_heart`, `bm_george`, …).
+`OPENROUTER_API_KEY`; `local` needs none), and the per-provider defaults for
+`--model` and `--voice`. OpenRouter narrates with **Kokoro-82M** — a cheap
+open-weight model (~$0.62 / 1M chars, i.e. `$0.0062 / 10k`) with its own voice
+IDs (`af_heart`, `bm_george`, …).
 
 ```bash
 # OpenRouter with a specific Kokoro voice:
 lecturn convert mybook.pdf --provider openrouter --voice bf_emma
 ```
+
+#### Local Kokoro server (`--provider local`)
+
+Run Kokoro-82M on your own hardware and point `lecturn` at it — **no API key,
+zero per-request cost**. It speaks the same OpenAI-compatible endpoint, so it
+works with the bundled server (see `server/README.md`) or a community one such
+as [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI). Defaults: model
+`kokoro`, voice `af_heart` (the same Kokoro voice catalogue as OpenRouter),
+base URL `http://127.0.0.1:8880/v1`.
+
+```bash
+# Start your Kokoro server on port 8880, then:
+lecturn convert mybook.pdf --provider local
+lecturn convert mybook.pdf --provider local --voice bf_emma
+# Point at a non-default host/port (or set LOCAL_TTS_BASE_URL):
+lecturn convert mybook.pdf --provider local --base-url http://10.0.0.9:8880/v1
+```
+
+> Unlike the hosted providers, a `local` primary has the automatic
+> OpenRouter/Kokoro fallback **disabled by default**, so a stopped local server
+> never silently spends OpenRouter money. Opt in with
+> `--fallback-model hexgrad/kokoro-82m` (and set `OPENROUTER_API_KEY`).
 
 > If the primary provider rejects a request (quota/entitlement/unknown-model),
 > `lecturn` automatically falls back to **OpenRouter + Kokoro-82M** (voice
@@ -345,6 +371,14 @@ Runs are resumable by design:
     silently reused.
 - Cache files are validated as real MP3s on reuse; corrupt/empty ones are
   re-synthesized rather than trusted.
+- **A fully successful run deletes its own cache automatically.** Once every
+  chunk is synthesized *and* every output file is written, the resume cache has
+  done its job, so `lecturn` removes it (this run's chunk files, plus the
+  `.audiobook_cache` directory if nothing else remains). Any interrupt or failure
+  leaves the cache in place so you can resume. Pass `--keep-cache` to preserve it
+  even on success — handy if you plan to re-run the same book with tweaks. Note:
+  **re-converting the same book after a cleaned-up successful run re-synthesizes
+  from scratch** (there is nothing left to resume from).
 
 ```bash
 # Start a long run:
@@ -358,13 +392,18 @@ lecturn convert bigbook.pdf --concurrency 5 --rpm 10
 # Start completely fresh (ignore the cache):
 lecturn convert bigbook.pdf --no-resume
 
+# Keep the cache even after a successful run (default is to delete it):
+lecturn convert bigbook.pdf --keep-cache
+
 # Clear the cache manually to reclaim disk:
 rm -rf output/.audiobook_cache
 ```
 
-> Because the cache is keyed by content, switching `--voice` or `--model`
-> mid-project leaves the old chunks on disk (unused). Delete
-> `output/.audiobook_cache` if you want to reclaim that space.
+> A successful run cleans up its own cache by default, so there's usually nothing
+> left to delete. But switching `--voice` or `--model` mid-project, using
+> `--keep-cache`, or stopping a run early can leave old/partial chunks on disk
+> (the cache is keyed by content). Delete `output/.audiobook_cache` if you want to
+> reclaim that space.
 
 ---
 
@@ -418,6 +457,12 @@ D) shown by `list-voices`:
 
 Run `lecturn list-voices --provider openrouter` for the full set with grades.
 
+### Local (Kokoro) voices
+
+A local Kokoro server serves the **same** Kokoro voice catalogue as OpenRouter
+(default `af_heart`), so the IDs above apply unchanged with `--provider local`.
+Browse them with `lecturn list-voices --provider local`.
+
 ---
 
 ## Choosing a model
@@ -466,6 +511,17 @@ however, the fallback target for a **StepFun** primary.
 > automatically; with the 1000-character chunk cap a chunk stays far under the
 > limit, so you won't hit it in normal use.
 
+### Local (self-hosted Kokoro) models
+
+| Model | Price / 10k chars | Notes |
+| --- | --- | --- |
+| `kokoro` | $0.0000 | Kokoro-82M on **your own** server. Free — you pay only for your own compute. Default and only local model. |
+
+The same Kokoro token guard applies. A `local` primary defaults its
+`--fallback-model` to **disabled** (so a stopped server never silently spends
+OpenRouter money); pass `--fallback-model hexgrad/kokoro-82m` (with
+`OPENROUTER_API_KEY` set) to enable the hosted fallback.
+
 ---
 
 ## Output files
@@ -491,10 +547,14 @@ All outputs get ID3v2 tags: title (`TIT2`), author/artist (`TPE1`), album
 | `STEPFUN_BASE_URL` | Override the StepFun API base URL (or use `--base-url`). |
 | `OPENROUTER_API_KEY` | Your OpenRouter API key. Needed for `--provider openrouter`, **and** for the automatic fallback from a StepFun run (read only if the fallback actually fires; skip it with `--fallback-model none`). |
 | `OPENROUTER_BASE_URL` | Override the OpenRouter API base URL (or use `--base-url`). |
+| `LOCAL_TTS_BASE_URL` | Override the local Kokoro server URL for `--provider local` (default `http://127.0.0.1:8880/v1`; or use `--base-url`). Optional. |
+| `LOCAL_TTS_API_KEY` | Optional key for `--provider local` — only if you front the server with an authenticating proxy. Unset ⇒ a placeholder key is used. |
 
 ```bash
 export STEPFUN_API_KEY="sk-..."          # for --provider stepfun (default)
 export OPENROUTER_API_KEY="sk-or-..."    # for --provider openrouter, and StepFun fallback
+# --provider local needs no key; optionally point it at a non-default server:
+export LOCAL_TTS_BASE_URL="http://127.0.0.1:8880/v1"
 ```
 
 You need the key for the provider you use. Because a StepFun run can fall back to

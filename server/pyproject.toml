@@ -1,0 +1,54 @@
+[project]
+name = "lecturn-kokoro-server"
+version = "0.1.0"
+description = "Self-contained FastAPI server that runs Kokoro-82M locally and exposes an OpenAI-compatible TTS API for lecturn's --provider local."
+readme = "README.md"
+# kokoro 0.9.4 requires Python >=3.10,<3.13; we pin to 3.12 to match lecturn's
+# runtime and to stay inside kokoro's supported window.
+requires-python = ">=3.12,<3.13"
+license = { text = "MIT" }
+authors = [{ name = "lecturn contributors" }]
+keywords = ["tts", "kokoro", "audiobook", "openai-compatible", "fastapi"]
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    # The Kokoro model + misaki G2P. We wrap the *PyTorch* package (NOT
+    # kokoro-onnx, whose default English G2P is raw espeak — a pronunciation
+    # regression for audiobooks). Pinned exactly: upstream is dormant.
+    "kokoro==0.9.4",
+    # misaki[en] pulls espeakng-loader wheels (macOS arm + Linux), so no system
+    # espeak-ng install is required for English. kokoro depends on it too; we
+    # name it explicitly so the [en] extra is guaranteed present.
+    "misaki[en]>=0.9.4",
+    # kokoro pins no torch version and is dormant, so pin it here. Kokoro-FastAPI
+    # ships torch==2.8.0; this compatible range keeps macOS-arm/Linux wheels
+    # resolvable while excluding unvetted majors.
+    "torch>=2.5,<2.9",
+    "numpy>=1.26",
+    # float32@24kHz PCM -> mp3/wav. mp3 export shells out to ffmpeg (already a
+    # documented lecturn prerequisite). On 3.12 pydub's `audioop` import resolves
+    # to the stdlib module, so no audioop-lts backport is needed (we pin <3.13).
+    "pydub>=0.25.1",
+]
+
+[project.scripts]
+lecturn-kokoro = "lecturn_kokoro_server.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    # Starlette's TestClient requires httpx.
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lecturn_kokoro_server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

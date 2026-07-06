@@ -10,9 +10,13 @@ import pytest
 
 from textbook_audiobook import config
 from textbook_audiobook.config import (
+    LOCAL_BASE_URL_DEFAULT,
+    LOCAL_DEFAULT_MODEL,
+    LOCAL_DEFAULT_VOICE,
     OPENROUTER_BASE_URL_DEFAULT,
     OPENROUTER_DEFAULT_MODEL,
     OPENROUTER_DEFAULT_VOICE,
+    LocalConfig,
     MissingApiKeyError,
     OpenRouterConfig,
     estimate_cost,
@@ -84,7 +88,49 @@ def test_kokoro_default_voice_in_catalogue():
 
 
 def test_provider_catalogues_do_not_collide():
-    # Disjoint naming is what lets estimate_cost look across both safely and lets
-    # the resume cache skip a provider tag.
+    # Disjoint naming is what lets estimate_cost look across all three safely and
+    # lets the resume cache skip a provider tag.
     assert set(config.MODELS).isdisjoint(config.OPENROUTER_MODELS)
+    assert set(config.MODELS).isdisjoint(config.LOCAL_MODELS)
+    assert set(config.OPENROUTER_MODELS).isdisjoint(config.LOCAL_MODELS)
     assert set(config.VOICES).isdisjoint(config.KOKORO_VOICES)
+
+
+# -- local (self-hosted Kokoro) config --------------------------------------
+
+
+def test_local_from_env_defaults_need_no_key(monkeypatch):
+    """No LOCAL_TTS_* set: a usable config with a placeholder key + localhost."""
+
+    monkeypatch.delenv("LOCAL_TTS_API_KEY", raising=False)
+    monkeypatch.delenv("LOCAL_TTS_BASE_URL", raising=False)
+
+    cfg = LocalConfig.from_env()
+
+    # Never raises MissingApiKeyError — the key falls back to a placeholder that
+    # satisfies the OpenAI SDK's non-empty requirement.
+    assert cfg.api_key == "local"
+    assert cfg.base_url == LOCAL_BASE_URL_DEFAULT
+    assert cfg.model == LOCAL_DEFAULT_MODEL
+    assert cfg.voice == LOCAL_DEFAULT_VOICE
+    # Kokoro servers default to PCM server-side; we must always send mp3.
+    assert cfg.response_format == "mp3"
+
+
+def test_local_from_env_reads_env_overrides(monkeypatch):
+    monkeypatch.setenv("LOCAL_TTS_API_KEY", "proxy-token")
+    monkeypatch.setenv("LOCAL_TTS_BASE_URL", "http://192.168.1.5:9000/v1")
+
+    cfg = LocalConfig.from_env()
+    assert cfg.api_key == "proxy-token"
+    assert cfg.base_url == "http://192.168.1.5:9000/v1"
+
+    # An explicit base_url argument wins over the environment.
+    cfg2 = LocalConfig.from_env(base_url="http://arg.example/v1")
+    assert cfg2.base_url == "http://arg.example/v1"
+
+
+def test_estimate_cost_resolves_local_kokoro_to_zero():
+    # Self-hosted => free. Resolves via LOCAL_MODELS (explicit 0.0), not a miss.
+    assert estimate_cost(1_000_000, LOCAL_DEFAULT_MODEL) == 0.0
+    assert LOCAL_DEFAULT_MODEL in config.LOCAL_MODELS
