@@ -11,11 +11,15 @@ import argparse
 import logging
 import os
 
+import lecturn_tts_contract as contract
+
 # Must be set before torch is imported (which happens lazily on first synthesis).
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8880
+# From the shared contract so the server binds where lecturn's `--provider local`
+# looks by default.
+DEFAULT_HOST = contract.DEFAULT_HOST
+DEFAULT_PORT = contract.DEFAULT_PORT
 
 
 def _build_parser() -> argparse.ArgumentParser:

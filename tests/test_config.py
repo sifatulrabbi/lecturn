@@ -75,7 +75,9 @@ def test_estimate_cost_resolves_kokoro():
 def test_estimate_cost_still_resolves_stepfun_models():
     # Regression: adding OpenRouter lookup must not change StepFun estimates.
     premium = estimate_cost(10_000, "stepaudio-2.5-tts")
-    assert premium == pytest.approx(config.MODELS["stepaudio-2.5-tts"].price_per_10k_chars)
+    assert premium == pytest.approx(
+        config.MODELS["stepaudio-2.5-tts"].price_per_10k_chars
+    )
 
 
 def test_estimate_cost_unknown_model_is_zero():

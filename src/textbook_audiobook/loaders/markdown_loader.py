@@ -78,7 +78,9 @@ def load(path: Path, *, title: str | None, author: str | None) -> Document:
     flush()
 
     if not chapters:
-        chapters = [Chapter(index=0, title="", text=_strip_inline_markdown(raw).strip())]
+        chapters = [
+            Chapter(index=0, title="", text=_strip_inline_markdown(raw).strip())
+        ]
     else:
         chapters = [
             Chapter(

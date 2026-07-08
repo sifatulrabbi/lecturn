@@ -1,15 +1,18 @@
 # lecturn
 
 Convert textbooks — **PDF, EPUB, plain text, or Markdown** — into narrated MP3
-audiobooks using [StepFun's](https://platform.stepfun.ai) TTS API (default) or
-[OpenRouter](https://openrouter.ai) (Kokoro-82M), selectable with `--provider`.
+audiobooks. Pick a TTS provider with `--provider`:
+[StepFun](https://platform.stepfun.ai) (default), [OpenRouter](https://openrouter.ai)
+(Kokoro-82M), or a **self-hosted local Kokoro server** (free/offline — see
+[`server/`](server/README.md)).
 
 ```
-load → clean → chunk → synthesize (StepFun / OpenRouter TTS) → assemble (MP3 + ID3)
+load → clean → chunk → synthesize (StepFun / OpenRouter / local TTS) → assemble (MP3 + ID3)
 ```
 
-- **Two providers** — StepFun (premium/economy) or OpenRouter's Kokoro-82M
-  (cheap, open-weight); pick with `--provider`.
+- **Three providers** — StepFun (premium/economy), OpenRouter's Kokoro-82M
+  (cheap, open-weight), or a local Kokoro server (`--provider local`: free, runs
+  on your own hardware, no per-request cost); pick with `--provider`.
 - **Chapter-aware** — detects chapters (PDF TOC, EPUB spine, `#`/`##`, `---`) and
   can emit one tagged MP3 per chapter.
 - **Fast, within limits** — bounded concurrency + an RPM throttle; faster at the
@@ -28,7 +31,12 @@ export STEPFUN_API_KEY="sk-..."            # your StepFun key (default provider)
 lecturn convert mybook.pdf --dry-run                  # free: shows plan + cost estimate
 lecturn convert mybook.pdf -o output/                 # convert (prompts to confirm cost)
 lecturn convert mybook.pdf --provider openrouter      # narrate with Kokoro-82M
+lecturn convert mybook.pdf --provider local           # free: your own Kokoro server
 ```
+
+For `--provider local`, start the bundled server first (`cd server && uv sync &&
+uv run lecturn-kokoro`) or point `--base-url` at any OpenAI-compatible Kokoro
+server. See [`server/README.md`](server/README.md).
 
 `--dry-run`, `lecturn list-models`, and `lecturn list-voices` need no API key.
 Requires **ffmpeg** on your `PATH`.

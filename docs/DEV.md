@@ -49,6 +49,16 @@ src/textbook_audiobook/
 tests/                # pytest suite (network-free; see below)
 docs/                 # SETUP.md, USAGE.md, DEV.md
 PLAN.md               # original design spec
+
+packages/
+└── lecturn-tts-contract/   # shared, zero-dependency single source of truth for
+                            #   the Kokoro contract (voice catalogue, model id,
+                            #   default voice, host/port/base URL, format + token
+                            #   caps). Imported by BOTH the CLI and server/ as an
+                            #   in-repo path dependency so they can never drift.
+
+server/                # separate uv project: self-hosted Kokoro TTS server
+                       #   (--provider local); its own torch-bound environment
 ```
 
 ---
@@ -139,8 +149,10 @@ everything is shared:
   token-input guard). The config is duck-typed (`.api_key` / `.base_url` /
   `.model` / `.voice` / `.response_format`), so any provider's config flows
   through. `LocalTTSClient` is a *clone* of `OpenRouterTTSClient` (same Kokoro
-  family, same token guard) rather than a subclass — the guard hook is copied so
-  the two providers stay independent — and its `_explain` messages name the
+  family, same token guard) rather than a subclass — each provider's guard hook
+  delegates to the shared module-level `_enforce_token_ceiling` free function
+  (rather than one subclassing the other) so the two stay independent — and its
+  `_explain` messages name the
   configured base URL, the first thing to check on a self-hosted server.
 - **Three configs, one union.** `config.StepFunConfig`, `config.OpenRouterConfig`,
   and `config.LocalConfig` each resolve their own key/base-URL from the
@@ -161,7 +173,13 @@ everything is shared:
   an explicit `$0.00` (self-hosted, free); `LOCAL_VOICES` is an **alias** of
   `KOKORO_VOICES` (same server model, same voices — not a duplicated table).
   `estimate_cost` looks in all three; `list-models` / `list-voices` print all
-  three, grouped, with a `--provider` filter.
+  three, grouped, with a `--provider` filter. The Kokoro voice catalogue
+  (`KOKORO_VOICES`, all 54 voices), the default voice, the `kokoro` model id, the
+  local base URL, and the token cap are **not** declared here anymore — they are
+  imported from the shared `lecturn_tts_contract` package (`packages/`), the
+  single source of truth both the CLI and `server/` consume, replacing the old
+  arrangement where the CLI re-declared only an English subset that drifted from
+  the server's full 54.
 - **Fingerprint invariant.** The resume-cache fingerprint stays
   voice+response_format+text (still **not** the model, and **no** provider tag).
   Kokoro voice IDs (`af_heart`, …) are structurally disjoint from StepFun's
@@ -268,7 +286,8 @@ everything is shared:
 
 - Match the surrounding style: `from __future__ import annotations`, type hints,
   small focused functions, module docstrings explaining the "why".
-- Keep secrets out of code — read from the environment (`config.resolve_api_key`).
+- Keep secrets out of code — read from the environment
+  (`config.resolve_stepfun_api_key`).
 - New network behaviour must be covered by a **stubbed** test.
 - Prefer clear names and comments that explain intent over cleverness.
 
@@ -296,7 +315,14 @@ git push -u origin my-change
 
 - Version lives in `pyproject.toml` (`[project].version`) and is surfaced by
   `lecturn --version`.
-- `uv.lock` is currently git-ignored; commit it if you want fully reproducible
-  installs.
+- **Lockfile policy (deliberately asymmetric).** `.gitignore` ignores `uv.lock`,
+  so the **root CLI** and the **`lecturn-tts-contract`** package do *not* commit a
+  lockfile — both resolve from loose bounds so `uv tool install .` stays flexible
+  across environments. The **`server/`** package is the exception: its `uv.lock`
+  **is** committed, because it pins a heavy, exact ML stack (`kokoro==0.9.4`,
+  a `torch` range) whose reproducibility matters and whose resolution is slow —
+  contributors should get the same known-good graph. If you want fully
+  reproducible CLI installs too, commit the root `uv.lock` (it now has real
+  transitive deps); until then the asymmetry is intentional, not an oversight.
 - Build artifacts with `uv build` (hatchling backend, wheel packages
   `src/textbook_audiobook`).

@@ -10,6 +10,8 @@ default to PCM, like OpenRouter) plus the configured voice and model. The
 
 from __future__ import annotations
 
+import pytest
+
 from textbook_audiobook import pipeline
 from textbook_audiobook import tts as tts_module
 from textbook_audiobook.config import LocalConfig
@@ -19,8 +21,6 @@ from textbook_audiobook.tts import (
     _FatalError,
     _RetryableError,
 )
-
-import pytest
 
 
 def _config() -> LocalConfig:

@@ -15,9 +15,9 @@ from textbook_audiobook.models import Chapter, Document
 
 def _imports():
     try:
-        from ebooklib import epub  # type: ignore
         import ebooklib  # type: ignore
         from bs4 import BeautifulSoup  # type: ignore
+        from ebooklib import epub  # type: ignore
 
         return ebooklib, epub, BeautifulSoup
     except ImportError as exc:  # pragma: no cover - dependency guard

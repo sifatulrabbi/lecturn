@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from textbook_audiobook.loaders import load_document, SUPPORTED_EXTENSIONS
+from textbook_audiobook.loaders import SUPPORTED_EXTENSIONS, load_document
 from textbook_audiobook.loaders.base import LoaderError
 from textbook_audiobook.loaders.pdf_loader import ImageOnlyPdfError
 
@@ -136,7 +136,7 @@ def test_pdf_image_only_raises(tmp_path):
 
 
 def _make_epub(path, *, title, author, chapters):
-    epub = pytest.importorskip("ebooklib.epub", reason="ebooklib required")
+    pytest.importorskip("ebooklib.epub", reason="ebooklib required")
     from ebooklib import epub as epub_mod
 
     book = epub_mod.EpubBook()
@@ -165,7 +165,10 @@ def test_epub_spine_documents_become_chapters(tmp_path):
         ep,
         title="EPUB Title",
         author="E. Author",
-        chapters=[("Opening", "First chapter prose."), ("Closing", "Second chapter prose.")],
+        chapters=[
+            ("Opening", "First chapter prose."),
+            ("Closing", "Second chapter prose."),
+        ],
     )
     doc = load_document(ep)
     assert doc.title == "EPUB Title"

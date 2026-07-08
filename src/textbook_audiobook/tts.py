@@ -19,15 +19,17 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, ClassVar
+from typing import ClassVar
 
 from textbook_audiobook.config import (
     HARD_CHAR_LIMIT,
     LOCAL_MODELS,
     OPENROUTER_MODELS,
     MissingApiKeyError,
+    ModelInfo,
     TTSConfig,
 )
 from textbook_audiobook.models import Chunk
@@ -37,6 +39,36 @@ from textbook_audiobook.tokens import count_tokens
 # fact that we approximate token counts (no public Kokoro tokenizer). For
 # Kokoro's 4096-token cap this rejects above ~3891 tokens.
 _TOKEN_LIMIT_SAFETY: float = 0.95
+
+
+def _enforce_token_ceiling(
+    text: str, model: str, models: dict[str, ModelInfo]
+) -> None:
+    """Reject ``text`` if it would overrun ``model``'s input token cap.
+
+    Shared by the two Kokoro-based clients (OpenRouter and local): each calls
+    it with its own catalogue (``OPENROUTER_MODELS`` / ``LOCAL_MODELS``). Kokoro
+    accepts up to ``max_input_tokens`` (4096) per request; we count tokens with
+    a tiktoken approximation (Kokoro publishes no tokenizer) and reject above a
+    safety margin. A module-level free function, deliberately NOT a shared base
+    method, so ``OpenRouterTTSClient`` and ``LocalTTSClient`` stay independent
+    (neither subclasses the other). NOTE: with ``HARD_CHAR_LIMIT`` (1000) a
+    chunk stays far under the cap, so this can never fire today — it makes the
+    constraint explicit and future-proofs a raised char cap or a lower-limit
+    model.
+    """
+
+    info = models.get(model)
+    if info is None or info.max_input_tokens is None:
+        return
+    ceiling = int(info.max_input_tokens * _TOKEN_LIMIT_SAFETY)
+    n_tokens = count_tokens(text)
+    if n_tokens > ceiling:
+        raise TTSError(
+            f"Chunk is ~{n_tokens} tokens, over {model}'s safe input limit "
+            f"of {ceiling} (model max {info.max_input_tokens}). "
+            "Lower --max-chars to produce smaller chunks."
+        )
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -89,6 +121,11 @@ class SynthesisStats:
     retries: int = 0
     failures: int = 0
     fallbacks: int = 0
+    # Characters billed per model, so a run that spans models/providers (via the
+    # cross-provider fallback) can be priced at each model's own rate rather than
+    # the final model's. Populated on every successful synth; empty on a full
+    # resume-cache hit (nothing was billed).
+    characters_by_model: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -123,7 +160,9 @@ class _BaseTTSClient:
     # network call itself is made through the OpenAI client, which is safe for
     # concurrent use. FallbackTTSClient reassigns this to a shared lock so a
     # primary and fallback client serialise their stats updates during a switch.
-    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         self._client = self._build_client()
@@ -209,6 +248,12 @@ class _BaseTTSClient:
                 with self._lock:
                     self.stats.requests += 1
                     self.stats.characters += len(text)
+                    # Attribute to the model that actually synthesized this
+                    # chunk (self.config.model == the local `model`), under the
+                    # same lock so a fallback switch can't race the counter.
+                    self.stats.characters_by_model[model] = (
+                        self.stats.characters_by_model.get(model, 0) + len(text)
+                    )
                 return out_path
             except _RetryableError as exc:
                 last_exc = exc
@@ -235,7 +280,7 @@ class _BaseTTSClient:
             f"attempt{plural}: {last_exc}"
         ) from last_exc
 
-    def _explain(self, exc: "_FatalError") -> str:
+    def _explain(self, exc: _FatalError) -> str:
         """Turn a fatal error into an actionable message.
 
         Provider hook: the generic default is deliberately terse. Each provider
@@ -285,7 +330,9 @@ class _BaseTTSClient:
             raise _RetryableError(str(exc)) from exc
         except AuthenticationError as exc:
             # Wrong/missing key — a model fallback cannot fix this.
-            raise _FatalError(str(exc), category="auth", fallback_eligible=False) from exc
+            raise _FatalError(
+                str(exc), category="auth", fallback_eligible=False
+            ) from exc
         except (NotFoundError, BadRequestError) as exc:
             if _is_voice_error(exc):
                 # Bad voice ID — swapping the model can't fix it.
@@ -293,12 +340,16 @@ class _BaseTTSClient:
                     str(exc), category="voice", fallback_eligible=False
                 ) from exc
             # Unknown/invalid model or request — a fallback model may work.
-            raise _FatalError(str(exc), category="model", fallback_eligible=True) from exc
+            raise _FatalError(
+                str(exc), category="model", fallback_eligible=True
+            ) from exc
         except (PermissionDeniedError, APIStatusError) as exc:
             # Quota (402), entitlement (403), and other status errors. These may
             # be model/provider-specific, so a provider fallback is worth a try.
             category = "quota" if _is_quota_error(exc) else "model"
-            raise _FatalError(str(exc), category=category, fallback_eligible=True) from exc
+            raise _FatalError(
+                str(exc), category=category, fallback_eligible=True
+            ) from exc
 
         # The binary response exposes the full payload; no streaming assembly.
         content = getattr(response, "content", None)
@@ -332,7 +383,7 @@ class StepFunTTSClient(_BaseTTSClient):
 
     provider_label: ClassVar[str] = "StepFun"
 
-    def _explain(self, exc: "_FatalError") -> str:
+    def _explain(self, exc: _FatalError) -> str:
         """Turn a fatal error into an actionable, StepFun-specific message."""
 
         if exc.category == "quota":
@@ -376,29 +427,16 @@ class OpenRouterTTSClient(_BaseTTSClient):
     provider_label: ClassVar[str] = "OpenRouter"
 
     def _check_input_limits(self, text: str, model: str) -> None:
-        """Reject a chunk whose token count would overrun the model's cap.
+        """Reject a chunk whose token count would overrun Kokoro's cap.
 
-        Kokoro accepts ``max_input_tokens`` (4096) per request. We count tokens
-        with a tiktoken approximation (Kokoro publishes no tokenizer) and reject
-        above a safety margin. NOTE: with ``HARD_CHAR_LIMIT`` (1000) a chunk is
-        at most ~1000 chars ≈ 300 tokens, so this can never fire today — it makes
-        the constraint explicit and future-proofs against a raised char cap or a
-        lower-limit model.
+        Delegates to :func:`_enforce_token_ceiling` with the OpenRouter
+        catalogue; see that function for the safety margin and why the guard is
+        inert under the 1000-char chunk cap today.
         """
 
-        info = OPENROUTER_MODELS.get(model)
-        if info is None or info.max_input_tokens is None:
-            return
-        ceiling = int(info.max_input_tokens * _TOKEN_LIMIT_SAFETY)
-        n_tokens = count_tokens(text)
-        if n_tokens > ceiling:
-            raise TTSError(
-                f"Chunk is ~{n_tokens} tokens, over {model}'s safe input limit "
-                f"of {ceiling} (model max {info.max_input_tokens}). "
-                "Lower --max-chars to produce smaller chunks."
-            )
+        _enforce_token_ceiling(text, model, OPENROUTER_MODELS)
 
-    def _explain(self, exc: "_FatalError") -> str:
+    def _explain(self, exc: _FatalError) -> str:
         """Turn a fatal error into an actionable, OpenRouter-specific message."""
 
         if exc.category == "quota":
@@ -442,29 +480,18 @@ class LocalTTSClient(_BaseTTSClient):
     provider_label: ClassVar[str] = "Local"
 
     def _check_input_limits(self, text: str, model: str) -> None:
-        """Reject a chunk whose token count would overrun the model's cap.
+        """Reject a chunk whose token count would overrun Kokoro's cap.
 
-        Same guard as :class:`OpenRouterTTSClient`, driven by ``LOCAL_MODELS``
-        (Kokoro's 4096-token ceiling). Cloned rather than inherited so the local
-        provider does not depend on the OpenRouter class. NOTE: with
-        ``HARD_CHAR_LIMIT`` (1000) a chunk stays far under the cap, so this can
-        never fire today — it makes the constraint explicit and future-proofs
-        against a raised char cap or a lower-limit model.
+        Delegates to :func:`_enforce_token_ceiling` with the ``LOCAL_MODELS``
+        catalogue. Cloned intent, not inheritance: the local provider does not
+        depend on :class:`OpenRouterTTSClient`; the shared logic lives in a free
+        function both call. See it for the safety margin and why the guard is
+        inert under the 1000-char chunk cap today.
         """
 
-        info = LOCAL_MODELS.get(model)
-        if info is None or info.max_input_tokens is None:
-            return
-        ceiling = int(info.max_input_tokens * _TOKEN_LIMIT_SAFETY)
-        n_tokens = count_tokens(text)
-        if n_tokens > ceiling:
-            raise TTSError(
-                f"Chunk is ~{n_tokens} tokens, over {model}'s safe input limit "
-                f"of {ceiling} (model max {info.max_input_tokens}). "
-                "Lower --max-chars to produce smaller chunks."
-            )
+        _enforce_token_ceiling(text, model, LOCAL_MODELS)
 
-    def _explain(self, exc: "_FatalError") -> str:
+    def _explain(self, exc: _FatalError) -> str:
         """Turn a fatal error into actionable, local-server-specific guidance.
 
         The messages name the configured base URL — the single most useful thing

@@ -6,8 +6,6 @@ real OpenAI client, and ``_request_audio`` is stubbed per test.
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from textbook_audiobook.config import StepFunConfig
@@ -15,9 +13,9 @@ from textbook_audiobook.tts import (
     StepFunTTSClient,
     TTSError,
     _FatalError,
-    _RetryableError,
     _is_quota_error,
     _is_voice_error,
+    _RetryableError,
 )
 
 

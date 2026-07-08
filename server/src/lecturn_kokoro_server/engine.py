@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 

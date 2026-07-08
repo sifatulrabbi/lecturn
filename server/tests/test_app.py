@@ -7,7 +7,7 @@ import io
 import numpy as np
 from pydub import AudioSegment
 
-from lecturn_kokoro_server import voices
+from lecturn_kokoro_server.app import MAX_INPUT_CHARS
 from lecturn_kokoro_server.engine import KokoroEngine
 
 
@@ -91,6 +91,17 @@ def test_empty_input_400(client):
     )
     assert resp.status_code == 400
     assert "input" in resp.text.lower()
+
+
+def test_oversized_input_400(client):
+    # Defense-in-depth: an unauthenticated server must bound the input it feeds to
+    # inference, independent of trusting the caller (lecturn caps at <=1000 chars).
+    resp = client.post(
+        "/v1/audio/speech",
+        json={"input": "x" * (MAX_INPUT_CHARS + 1), "voice": "af_heart"},
+    )
+    assert resp.status_code == 400
+    assert "limit" in resp.text.lower()
 
 
 # -- unknown model accepted ------------------------------------------------

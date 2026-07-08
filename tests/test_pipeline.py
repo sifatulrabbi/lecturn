@@ -17,7 +17,6 @@ from textbook_audiobook import pipeline
 from textbook_audiobook.config import StepFunConfig
 from textbook_audiobook.tts import StepFunTTSClient, TTSError
 
-
 BOOK = """# The Art of Clear Thinking
 
 ## Chapter 1: Terrain
@@ -198,7 +197,8 @@ def _inflight_tracker(monkeypatch, mp3_bytes, *, sleep=0.03):
 
 
 def test_default_and_concurrency_1_run_sequentially(tmp_path, monkeypatch, mp3_bytes):
-    """The default (and explicit concurrency=1) must keep exactly one request in flight."""
+    """The default (and explicit concurrency=1) must keep exactly one request in
+    flight."""
 
     state = _inflight_tracker(monkeypatch, mp3_bytes)
     src = _write_book_n_chunks(tmp_path, 6)
@@ -207,7 +207,7 @@ def test_default_and_concurrency_1_run_sequentially(tmp_path, monkeypatch, mp3_b
         src, tmp_path / "out", _config(), max_chars=1000, concurrency=1, rpm=0
     )
 
-    assert len(result.chunks) >= 4          # meaningful: several chunks to (not) overlap
+    assert len(result.chunks) >= 4  # meaningful: several chunks to (not) overlap
     assert state["max_in_flight"] == 1      # never more than one at a time
     assert state["count"] == len(result.chunks)
 
@@ -274,7 +274,9 @@ def test_resume_resynthesizes_when_voice_changes(tmp_path, stub_network):
 
     src = _write_book(tmp_path)
     out = tmp_path / "out"
-    cfg_a = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
+    cfg_a = StepFunConfig(
+        api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl"
+    )
     # cleanup_cache=False: keep the voice-A cache so the voice-B run below proves
     # a voice change invalidates the fingerprint (rather than finding it deleted).
     first = pipeline.run_pipeline(src, out, cfg_a, max_chars=1000, cleanup_cache=False)
@@ -282,9 +284,12 @@ def test_resume_resynthesizes_when_voice_changes(tmp_path, stub_network):
     assert stub_network["requests"] == n
 
     stub_network["requests"] = 0
-    cfg_b = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="vibrant-youth")
+    cfg_b = StepFunConfig(
+        api_key="x", base_url="http://x", model="step-tts-2", voice="vibrant-youth"
+    )
     pipeline.run_pipeline(src, out, cfg_b, max_chars=1000, resume=True)
-    assert stub_network["requests"] == n    # every chunk re-synthesized for the new voice
+    # every chunk re-synthesized for the new voice
+    assert stub_network["requests"] == n
 
 
 def test_resume_reuses_cache_across_model_switch(tmp_path, stub_network):
@@ -296,16 +301,23 @@ def test_resume_reuses_cache_across_model_switch(tmp_path, stub_network):
 
     src = _write_book(tmp_path)
     out = tmp_path / "out"
-    premium = StepFunConfig(api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="lively-girl")
+    premium = StepFunConfig(
+        api_key="x", base_url="http://x", model="stepaudio-2.5-tts", voice="lively-girl"
+    )
     # cleanup_cache=False: keep the cache so the model switch below reuses it.
-    first = pipeline.run_pipeline(src, out, premium, max_chars=1000, cleanup_cache=False)
+    first = pipeline.run_pipeline(
+        src, out, premium, max_chars=1000, cleanup_cache=False
+    )
     n = len(first.chunks)
     assert stub_network["requests"] == n
 
     stub_network["requests"] = 0
-    economy = StepFunConfig(api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl")
+    economy = StepFunConfig(
+        api_key="x", base_url="http://x", model="step-tts-2", voice="lively-girl"
+    )
     pipeline.run_pipeline(src, out, economy, max_chars=1000, resume=True)
-    assert stub_network["requests"] == 0    # same voice+text -> cache reused despite model change
+    # same voice+text -> cache reused despite model change
+    assert stub_network["requests"] == 0
 
 
 # -- cache cleanup on complete success --------------------------------------
