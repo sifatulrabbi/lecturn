@@ -22,10 +22,10 @@ from textbook_audiobook.config import (
     MODELS,
     OPENROUTER_DEFAULT_MODEL,
     OPENROUTER_DEFAULT_VOICE,
+    VOICES,
     LocalConfig,
     OpenRouterConfig,
     StepFunConfig,
-    VOICES,
 )
 from textbook_audiobook.tts import (
     LocalTTSClient,
@@ -352,6 +352,37 @@ def test_resolve_fallback_local_explicit_reenables():
     )
 
 
+def _capture_console_warnings(monkeypatch) -> list[str]:
+    """Replace cli.console with a recorder and return the captured messages."""
+
+    messages: list[str] = []
+    monkeypatch.setattr(
+        cli, "console",
+        SimpleNamespace(print=lambda msg, **kw: messages.append(str(msg))),
+    )
+    return messages
+
+
+def test_resolve_fallback_explicit_collision_warns(monkeypatch):
+    # An EXPLICIT --fallback-model that matches the primary is a user mistake:
+    # it silently disabled the fallback, so warn (but still return None).
+    messages = _capture_console_warnings(monkeypatch)
+    assert (
+        _resolve_fallback(OPENROUTER_DEFAULT_MODEL, OPENROUTER_DEFAULT_MODEL)
+        is None
+    )
+    assert len(messages) == 1
+    assert "same as the primary model" in messages[0]
+
+
+def test_resolve_fallback_default_collision_is_silent(monkeypatch):
+    # The OpenRouter-primary default no-op (fallback omitted, default == primary)
+    # is deliberate and must stay silent — no warning.
+    messages = _capture_console_warnings(monkeypatch)
+    assert _resolve_fallback(None, OPENROUTER_DEFAULT_MODEL) is None
+    assert messages == []
+
+
 # -- _format_price precision ------------------------------------------------
 
 
@@ -405,7 +436,9 @@ def test_convert_stepfun_wiring(tmp_path, monkeypatch):
 
     book = tmp_path / "book.md"
     book.write_text("# T\n\nSome text to narrate here.\n", "utf-8")
-    result = runner.invoke(app, ["convert", str(book), "-y", "--output", str(tmp_path / "o")])
+    result = runner.invoke(
+        app, ["convert", str(book), "-y", "--output", str(tmp_path / "o")]
+    )
     assert result.exit_code == 0
 
     cfg = captured["config"]

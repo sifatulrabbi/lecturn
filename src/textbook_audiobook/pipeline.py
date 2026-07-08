@@ -17,10 +17,10 @@ import hashlib
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from rich.console import Console
 from rich.progress import (
@@ -190,8 +190,19 @@ def run_pipeline(
     ):
         _cleanup_cache(cache_dir, chunk_files, console)
 
-    # Cost reflects the model actually used (may be the fallback).
-    estimated = estimate_cost(client.stats.characters, client.active_model)
+    # Attribute each chunk's characters to the model that actually synthesized
+    # it, then sum per model. A mid-book cross-provider fallback bills the
+    # earlier chunks at the primary's rate and the later ones at the fallback's
+    # (a >100x ratio for StepFun -> Kokoro), so a single post-hoc estimate at the
+    # final model's rate would be badly wrong. On a full resume-cache hit nothing
+    # was billed, so the map is empty and the estimate is 0.0.
+    estimated = sum(
+        (
+            estimate_cost(chars, model)
+            for model, chars in client.stats.characters_by_model.items()
+        ),
+        0.0,
+    )
     return PipelineResult(
         document=cleaned,
         chunks=chunks,

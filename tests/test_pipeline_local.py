@@ -14,7 +14,6 @@ from textbook_audiobook import pipeline
 from textbook_audiobook.config import LocalConfig
 from textbook_audiobook.tts import LocalTTSClient
 
-
 BOOK = """# A Small Book
 
 ## Chapter 1

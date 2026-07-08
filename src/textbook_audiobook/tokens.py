@@ -18,7 +18,7 @@ never a live download.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 # tiktoken encoding used as a stand-in for Kokoro's (unpublished) tokenizer.
 _ENCODING_NAME = "o200k_base"
@@ -73,7 +73,10 @@ def _default_encoder() -> _Encoder:
     if encoding is None:
         _cached_encoder = _heuristic
     else:
-        _cached_encoder = lambda text: len(encoding.encode(text))
+        def _tiktoken_encoder(text: str) -> int:
+            return len(encoding.encode(text))
+
+        _cached_encoder = _tiktoken_encoder
     return _cached_encoder
 
 

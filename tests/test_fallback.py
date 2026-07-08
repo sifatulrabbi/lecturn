@@ -167,7 +167,9 @@ def test_switch_is_exactly_once_under_concurrency(monkeypatch, tmp_path, mp3_byt
 
     def worker(i: int) -> None:
         try:
-            results.append(wrapper.synthesize_text(f"chunk {i}", tmp_path / f"c{i}.mp3"))
+            results.append(
+                wrapper.synthesize_text(f"chunk {i}", tmp_path / f"c{i}.mp3")
+            )
         except Exception as exc:  # pragma: no cover - would fail the assert below
             results.append(exc)
 
@@ -197,7 +199,9 @@ def test_local_primary_no_switch_when_fallback_disabled(monkeypatch, tmp_path):
     assert wrapper.active_model == "kokoro"
 
 
-def test_local_primary_switches_when_fallback_explicit(monkeypatch, tmp_path, mp3_bytes):
+def test_local_primary_switches_when_fallback_explicit(
+    monkeypatch, tmp_path, mp3_bytes
+):
     # An explicit --fallback-model re-enables the OpenRouter fallback even for a
     # local primary: on an eligible error it switches to OpenRouter/Kokoro.
     primary = _local(monkeypatch, _quota)
@@ -296,3 +300,62 @@ def test_pipeline_fallback_fingerprints_with_active_config(
     # library default is sequential) is stored under the pre-switch fingerprint.
     fp0 = _chunk_fingerprint(stepfun_cfg, chunks[0].text)
     assert (cache / f"chunk_{chunks[0].index:05d}_{fp0}.mp3").exists()
+
+
+def test_pipeline_cost_mixes_primary_and_fallback_rates(
+    tmp_path, monkeypatch, mp3_bytes
+):
+    # The primary (StepFun) narrates the FIRST chunk, then goes 402 (quota) on the
+    # next, forcing a mid-book switch to OpenRouter/Kokoro for the remainder. The
+    # cost estimate must bill chunk 0 at StepFun's rate and the rest at Kokoro's —
+    # NOT price everything at the final (Kokoro) model's rate (the pre-fix bug).
+    monkeypatch.setattr(StepFunTTSClient, "_build_client", lambda self: object())
+    sf_calls = {"n": 0}
+
+    def stepfun_req(self, text, model):
+        n = sf_calls["n"]
+        sf_calls["n"] += 1
+        if n == 0:  # first chunk succeeds on the primary
+            return mp3_bytes
+        raise _FatalError("out of credit", category="quota", fallback_eligible=True)
+
+    monkeypatch.setattr(StepFunTTSClient, "_request_audio", stepfun_req)
+
+    monkeypatch.setattr(OpenRouterTTSClient, "_build_client", lambda self: object())
+    monkeypatch.setattr(
+        OpenRouterTTSClient, "_request_audio", lambda self, text, model: mp3_bytes
+    )
+
+    fb_cfg = OpenRouterConfig(
+        api_key="x", base_url="http://x",
+        model="hexgrad/kokoro-82m", voice="af_heart",
+    )
+
+    src = tmp_path / "book.md"
+    src.write_text(_BOOK, encoding="utf-8")
+    out_dir = tmp_path / "out"
+    stepfun_cfg = StepFunConfig(
+        api_key="x", base_url="http://x",
+        model="stepaudio-2.5-tts", voice="lively-girl",
+    )
+
+    result = pipeline.run_pipeline(
+        src, out_dir, stepfun_cfg, max_chars=1000,
+        fallback_factory=lambda: OpenRouterTTSClient(config=fb_cfg),
+    )
+
+    chunks = result.chunks
+    assert len(chunks) >= 2
+
+    # Chunk 0 was billed at StepFun's rate; every later chunk at Kokoro's.
+    primary_chars = chunks[0].char_count
+    fallback_chars = sum(c.char_count for c in chunks[1:])
+    expected = estimate_cost(primary_chars, "stepaudio-2.5-tts") + estimate_cost(
+        fallback_chars, "hexgrad/kokoro-82m"
+    )
+    assert result.estimated_cost_usd == pytest.approx(expected)
+
+    # The old bug priced ALL characters at the final (Kokoro) rate — >100x cheaper
+    # for the StepFun-billed chunk — so the correct estimate is strictly larger.
+    total = primary_chars + fallback_chars
+    assert result.estimated_cost_usd > estimate_cost(total, "hexgrad/kokoro-82m")

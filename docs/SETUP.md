@@ -62,6 +62,14 @@ uv run lecturn --help       # run without installing
 
 For a dev setup that includes test dependencies, see [DEV.md](DEV.md).
 
+> **Both install paths build an in-repo package.** `uv tool install .` and
+> `uv sync` also build `packages/lecturn-tts-contract` — an in-repo *path*
+> dependency that holds the shared Kokoro voice catalogue and local-provider
+> defaults (the single source of truth both the CLI and the bundled server
+> import). This means you need a **full clone** of the repository: a bare
+> `git+https` install of just the CLI can't resolve the local path and will
+> fail. Cloning and installing from the checkout, as shown above, always works.
+
 ---
 
 ## Configure credentials
@@ -107,8 +115,7 @@ is a cheap open-weight voice model (~$0.62 / 1M chars).
 Run Kokoro-82M on your own hardware and point `lecturn` at it — **no API key
 required**, and every request is free (you pay only for your own compute). It
 works with any OpenAI-compatible Kokoro server: the bundled one (see
-[`server/README.md`](../server/README.md) — added by the local-server slice, so
-it may not exist in your checkout yet) or a community server such as
+[`server/README.md`](../server/README.md)) or a community server such as
 [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI).
 
 ```bash

@@ -30,7 +30,16 @@ dependencies = [
     # documented lecturn prerequisite). On 3.12 pydub's `audioop` import resolves
     # to the stdlib module, so no audioop-lts backport is needed (we pin <3.13).
     "pydub>=0.25.1",
+    # The single source of truth for the shared Kokoro TTS contract (voice
+    # catalogue, model id, default voice, host/port, format defaults, char cap).
+    # An in-repo path dependency (see [tool.uv.sources]) so the server and the
+    # CLI can never drift apart on these facts. Zero-dependency, so it adds
+    # nothing to the heavy torch stack.
+    "lecturn-tts-contract",
 ]
+
+[tool.uv.sources]
+lecturn-tts-contract = { path = "../packages/lecturn-tts-contract", editable = true }
 
 [project.scripts]
 lecturn-kokoro = "lecturn_kokoro_server.cli:main"
@@ -40,6 +49,11 @@ dev = [
     "pytest>=8.0",
     # Starlette's TestClient requires httpx.
     "httpx>=0.27",
+    # The OpenAI SDK drives the cross-boundary contract test (test_contract.py),
+    # exercising the exact transport lecturn's LocalTTSClient uses over an
+    # in-process ASGI transport — no real socket, no torch.
+    "openai>=1.40",
+    "ruff>=0.9",
 ]
 
 [build-system]
@@ -52,3 +66,14 @@ packages = ["src/lecturn_kokoro_server"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+# Match the wrap width the codebase already uses.
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+# Same focused rule set as the root package (see its pyproject for rationale).
+select = ["E", "F", "W", "I", "UP", "B"]
+# FastAPI/Starlette share Typer's default-is-a-call idiom (e.g. `Depends(...)`).
+ignore = ["B008", "UP042"]

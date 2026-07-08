@@ -9,6 +9,8 @@ default) plus the configured voice and model.
 
 from __future__ import annotations
 
+import pytest
+
 from textbook_audiobook import pipeline
 from textbook_audiobook import tts as tts_module
 from textbook_audiobook.config import OpenRouterConfig
@@ -18,8 +20,6 @@ from textbook_audiobook.tts import (
     _FatalError,
     _RetryableError,
 )
-
-import pytest
 
 
 def _config() -> OpenRouterConfig:

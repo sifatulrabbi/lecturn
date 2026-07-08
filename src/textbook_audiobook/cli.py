@@ -13,15 +13,15 @@ self-hosted, OpenAI-compatible Kokoro server). ``--model`` / ``--voice`` /
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.table import Table
 
-from textbook_audiobook import __version__
+from textbook_audiobook import __version__, pipeline
 from textbook_audiobook.config import (
     DEFAULT_MODEL,
     DEFAULT_VOICE,
@@ -38,14 +38,18 @@ from textbook_audiobook.config import (
     VOICES,
     LocalConfig,
     MissingApiKeyError,
+    ModelInfo,
     OpenRouterConfig,
     StepFunConfig,
     TTSConfig,
 )
-from textbook_audiobook.loaders import LoaderError, SUPPORTED_EXTENSIONS
-from textbook_audiobook import pipeline
+from textbook_audiobook.loaders import SUPPORTED_EXTENSIONS, LoaderError
 from textbook_audiobook.pipeline import DEFAULT_RPM, MAX_USEFUL_CONCURRENCY
-from textbook_audiobook.tts import LocalTTSClient, OpenRouterTTSClient
+from textbook_audiobook.tts import (
+    LocalTTSClient,
+    OpenRouterTTSClient,
+    _BaseTTSClient,
+)
 
 
 class Provider(str, Enum):
@@ -60,6 +64,54 @@ class Provider(str, Enum):
     stepfun = "stepfun"
     openrouter = "openrouter"
     local = "local"
+
+
+@dataclass(frozen=True)
+class _ProviderSpec:
+    """Everything ``convert`` needs to wire up one provider.
+
+    Single source of truth that replaces the three parallel if/elif chains
+    ``convert`` used to run (resolve model/voice defaults, build the config,
+    build the client factory), so adding a provider is one table entry rather
+    than three edits. ``client_cls is None`` selects the pipeline's built-in
+    StepFun client (matching the historical ``client_factory = None``);
+    ``fallback_default`` is the ``--fallback-model`` default (``None`` for local
+    so a dead local server never silently spends OpenRouter money).
+    """
+
+    default_model: str
+    default_voice: str
+    known_models: dict[str, ModelInfo]
+    config_cls: type[TTSConfig]
+    client_cls: type[_BaseTTSClient] | None
+    fallback_default: str | None = OPENROUTER_DEFAULT_MODEL
+
+
+_PROVIDERS: dict[Provider, _ProviderSpec] = {
+    Provider.stepfun: _ProviderSpec(
+        default_model=DEFAULT_MODEL,
+        default_voice=DEFAULT_VOICE,
+        known_models=MODELS,
+        config_cls=StepFunConfig,
+        client_cls=None,
+    ),
+    Provider.openrouter: _ProviderSpec(
+        default_model=OPENROUTER_DEFAULT_MODEL,
+        default_voice=OPENROUTER_DEFAULT_VOICE,
+        known_models=OPENROUTER_MODELS,
+        config_cls=OpenRouterConfig,
+        client_cls=OpenRouterTTSClient,
+    ),
+    Provider.local: _ProviderSpec(
+        default_model=LOCAL_DEFAULT_MODEL,
+        default_voice=LOCAL_DEFAULT_VOICE,
+        known_models=LOCAL_MODELS,
+        config_cls=LocalConfig,
+        client_cls=LocalTTSClient,
+        # A dead local server must not silently spend OpenRouter money.
+        fallback_default=None,
+    ),
+}
 
 
 app = typer.Typer(
@@ -110,15 +162,30 @@ def _resolve_fallback(
       with the default Kokoro fallback);
     - otherwise the given value (interpreted as an OpenRouter model). An explicit
       value re-enables the OpenRouter fallback even for a ``local`` primary.
+
+    When the collapse to a no-op is caused by an *explicit* ``--fallback-model``
+    matching the primary (as opposed to the deliberate, silent OpenRouter-
+    primary default case), a warning is printed so the user knows their flag had
+    no effect. Control flow is unchanged either way.
     """
 
     if fallback_model is None:
         resolved: str | None = default
+        explicit = False
     elif fallback_model.strip().lower() in {"none", ""}:
         return None
     else:
         resolved = fallback_model.strip()
+        explicit = True
     if resolved == primary_model:
+        if explicit:
+            console.print(
+                "[yellow]Warning:[/yellow] --fallback-model "
+                f"'{resolved}' is the same as the primary model, so fallback "
+                "is disabled (switching to the same model can't recover a "
+                "quota/model failure). Pass a different model, or 'none' to "
+                "silence this."
+            )
         return None
     return resolved
 
@@ -141,21 +208,21 @@ def convert(
             "'local' (a self-hosted Kokoro server)."
         ),
     ),
-    model: Optional[str] = typer.Option(
+    model: str | None = typer.Option(
         None, "--model", "-m",
         help=(
             "TTS model. Defaults to the provider's best-quality model (stepfun: "
             "stepaudio-2.5-tts, openrouter: hexgrad/kokoro-82m, local: kokoro)."
         ),
     ),
-    voice: Optional[str] = typer.Option(
+    voice: str | None = typer.Option(
         None, "--voice",
         help=(
             "Voice ID. Defaults per provider (stepfun: lively-girl, openrouter "
             "& local: af_heart)."
         ),
     ),
-    fallback_model: Optional[str] = typer.Option(
+    fallback_model: str | None = typer.Option(
         None, "--fallback-model",
         help=(
             "Model to fall back to (always via OpenRouter/Kokoro) if the primary "
@@ -167,10 +234,10 @@ def convert(
             "Pass 'none' to disable."
         ),
     ),
-    title: Optional[str] = typer.Option(
+    title: str | None = typer.Option(
         None, "--title", help="Override the book title (used in tags/filename)."
     ),
-    author: Optional[str] = typer.Option(
+    author: str | None = typer.Option(
         None, "--author", help="Override the author (used in artist tag)."
     ),
     split_by_chapter: bool = typer.Option(
@@ -181,7 +248,7 @@ def convert(
         HARD_CHAR_LIMIT, "--max-chars",
         help=f"Max chars per chunk (hard cap {HARD_CHAR_LIMIT}).",
     ),
-    base_url: Optional[str] = typer.Option(
+    base_url: str | None = typer.Option(
         None, "--base-url",
         help=(
             "Override the provider's API base URL (e.g. point 'local' at a "
@@ -226,7 +293,10 @@ def convert(
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run",
-        help="Load, clean, and chunk only; print stats and cost estimate. No API calls.",
+        help=(
+            "Load, clean, and chunk only; print stats and cost estimate. "
+            "No API calls."
+        ),
     ),
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the cost-estimate confirmation prompt."
@@ -268,29 +338,21 @@ def convert(
         raise typer.Exit(code=2)
 
     # --- Resolve per-provider defaults --------------------------------------
-    # Each flag defaults to None so we can tell "not given" from an explicit
-    # value and fill in the right provider default here.
-    if provider is Provider.openrouter:
-        resolved_model = model if model is not None else OPENROUTER_DEFAULT_MODEL
-        resolved_voice = voice if voice is not None else OPENROUTER_DEFAULT_VOICE
-        known_models = OPENROUTER_MODELS
-    elif provider is Provider.local:
-        resolved_model = model if model is not None else LOCAL_DEFAULT_MODEL
-        resolved_voice = voice if voice is not None else LOCAL_DEFAULT_VOICE
-        known_models = LOCAL_MODELS
-    else:
-        resolved_model = model if model is not None else DEFAULT_MODEL
-        resolved_voice = voice if voice is not None else DEFAULT_VOICE
-        known_models = MODELS
+    # One registry lookup drives the model/voice defaults, the config class, and
+    # the client factory. Each flag defaults to None so we can tell "not given"
+    # from an explicit value and fill in the provider default here.
+    spec = _PROVIDERS[provider]
+    resolved_model = model if model is not None else spec.default_model
+    resolved_voice = voice if voice is not None else spec.default_voice
+    known_models = spec.known_models
 
     # A configured fallback ALWAYS routes to OpenRouter/Kokoro: default → Kokoro,
     # 'none' → disabled, fallback==primary → no-op (OpenRouter already primary).
-    # A 'local' primary defaults the fallback to disabled (None) so a dead local
-    # server never silently spends OpenRouter money; an explicit --fallback-model
-    # re-enables it.
-    fallback_default = None if provider is Provider.local else OPENROUTER_DEFAULT_MODEL
+    # A 'local' primary defaults the fallback to disabled (spec.fallback_default
+    # is None) so a dead local server never silently spends OpenRouter money; an
+    # explicit --fallback-model re-enables it.
     resolved_fallback = _resolve_fallback(
-        fallback_model, resolved_model, default=fallback_default
+        fallback_model, resolved_model, default=spec.fallback_default
     )
 
     if resolved_model not in known_models:
@@ -313,7 +375,7 @@ def convert(
         )
     except LoaderError as exc:
         console.print(f"[red]Failed to load input:[/red] {exc}")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     total_chars = sum(c.char_count for c in chunks)
     _print_plan(
@@ -339,37 +401,26 @@ def convert(
     # unauthenticated, so the key falls back to a placeholder) — there is no
     # missing-key exit path for the local provider.
     try:
-        if provider is Provider.openrouter:
-            config = OpenRouterConfig.from_env(
-                model=resolved_model, voice=resolved_voice, base_url=base_url
-            )
-        elif provider is Provider.local:
-            config = LocalConfig.from_env(
-                model=resolved_model, voice=resolved_voice, base_url=base_url
-            )
-        else:
-            config = StepFunConfig.from_env(
-                model=resolved_model, voice=resolved_voice, base_url=base_url
-            )
+        config = spec.config_cls.from_env(
+            model=resolved_model, voice=resolved_voice, base_url=base_url
+        )
     except MissingApiKeyError as exc:
         console.print(f"[red]{exc}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     # --- Run ----------------------------------------------------------------
-    # Primary client factory: StepFun uses the pipeline's default (None);
-    # OpenRouter and local supply their own. The factory takes the resolved
-    # config so the pipeline never has to trust the caller to keep config and
-    # client in sync.
-    if provider is Provider.openrouter:
-        def _make_client(cfg: TTSConfig) -> OpenRouterTTSClient:
-            return OpenRouterTTSClient(config=cfg)
+    # Primary client factory: StepFun uses the pipeline's default (spec with
+    # client_cls=None → None here); the Kokoro providers supply their own. The
+    # factory takes the resolved config so the pipeline never has to trust the
+    # caller to keep config and client in sync.
+    client_factory = None
+    if spec.client_cls is not None:
+        client_cls = spec.client_cls
+
+        def _make_client(cfg: TTSConfig) -> _BaseTTSClient:
+            return client_cls(config=cfg)
+
         client_factory = _make_client
-    elif provider is Provider.local:
-        def _make_local_client(cfg: TTSConfig) -> LocalTTSClient:
-            return LocalTTSClient(config=cfg)
-        client_factory = _make_local_client
-    else:
-        client_factory = None
 
     # Fallback ALWAYS goes to OpenRouter/Kokoro (voice af_heart), built lazily at
     # fallback time so a StepFun-only run never needs OPENROUTER_API_KEY upfront.
@@ -405,17 +456,17 @@ def convert(
             "re-run the same command to resume from where it stopped "
             "(or pass --no-resume to start over)."
         )
-        raise typer.Exit(code=130)
+        raise typer.Exit(code=130) from None
     except (LoaderError, RuntimeError) as exc:
         console.print(f"[red]Pipeline failed:[/red] {exc}")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
     _print_result(result)
 
 
 @app.command("list-voices")
 def list_voices(
-    provider: Optional[Provider] = typer.Option(
+    provider: Provider | None = typer.Option(
         None, "--provider",
         case_sensitive=False,
         help="Show only one provider's voices (default: both).",
@@ -457,7 +508,7 @@ def list_voices(
 
 @app.command("list-models")
 def list_models(
-    provider: Optional[Provider] = typer.Option(
+    provider: Provider | None = typer.Option(
         None, "--provider",
         case_sensitive=False,
         help="Show only one provider's models (default: both).",

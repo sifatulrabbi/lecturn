@@ -14,7 +14,6 @@ from textbook_audiobook import pipeline
 from textbook_audiobook.config import OpenRouterConfig
 from textbook_audiobook.tts import OpenRouterTTSClient
 
-
 BOOK = """# A Small Book
 
 ## Chapter 1

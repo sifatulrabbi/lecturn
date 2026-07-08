@@ -20,7 +20,7 @@ from __future__ import annotations
 import re
 
 from textbook_audiobook.config import HARD_CHAR_LIMIT
-from textbook_audiobook.models import Chapter, Chunk, Document
+from textbook_audiobook.models import Chunk, Document
 
 # Common abbreviations that end in a period but do not end a sentence.
 _ABBREVIATIONS = {

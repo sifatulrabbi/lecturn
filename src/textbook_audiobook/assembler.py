@@ -37,7 +37,7 @@ def _import_pydub():
         ) from exc
 
 
-def _concat(segment_paths: list[Path], AudioSegment) -> "object":
+def _concat(segment_paths: list[Path], AudioSegment) -> object:
     if not segment_paths:
         raise AssemblerError("No audio segments to concatenate.")
     combined = AudioSegment.empty()
@@ -146,8 +146,14 @@ def write_id3_tags(
     """Write ID3v2 tags to an MP3 file using mutagen."""
 
     try:
-        from mutagen.id3 import ID3, TALB, TIT2, TPE1, TRCK  # type: ignore
-        from mutagen.id3 import ID3NoHeaderError  # type: ignore
+        from mutagen.id3 import (  # type: ignore
+            ID3,
+            TALB,
+            TIT2,
+            TPE1,
+            TRCK,
+            ID3NoHeaderError,  # type: ignore
+        )
     except ImportError as exc:  # pragma: no cover - dependency guard
         raise AssemblerError(
             "mutagen is required for ID3 tagging. Install with `uv add mutagen`."

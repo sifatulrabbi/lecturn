@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import pytest
 
-from textbook_audiobook import assembler
 from textbook_audiobook.assembler import AssemblerError, assemble, write_id3_tags
 from textbook_audiobook.models import Chapter, Chunk, Document
 
@@ -31,7 +30,9 @@ def _read_tags(path):
     return ID3(path)
 
 
-def test_single_file_concat_and_tags(tmp_path, mp3_bytes, mp3_segment_ms, mp3_duration_ms):
+def test_single_file_concat_and_tags(
+    tmp_path, mp3_bytes, mp3_segment_ms, mp3_duration_ms
+):
     # Two chapters, three chunks total -> one combined file.
     doc = _doc([Chapter(0, "One", "a"), Chapter(1, "Two", "b")])
     chunks = [

@@ -31,6 +31,7 @@ os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 import time
 
+import lecturn_tts_contract as contract
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -41,8 +42,24 @@ from lecturn_kokoro_server.engine import KokoroEngine
 logger = logging.getLogger(__name__)
 
 # Single-model server. We accept any `model` value (see the route) but advertise
-# this canonical id, which is also what Kokoro-FastAPI reports.
-MODEL_ID: str = "kokoro"
+# this canonical id, which is also what Kokoro-FastAPI reports. From the shared
+# contract so the server and lecturn's CLI never disagree on it.
+MODEL_ID: str = contract.MODEL_ID
+
+# Defense-in-depth cap on a single request's text. The server is unauthenticated
+# (see the module docstring), so it must not trust callers to bound their input:
+# an arbitrarily long `input` would drive unbounded G2P/torch inference time and
+# memory. lecturn itself chunks to <=1000 chars, so this generous ceiling never
+# rejects a real lecturn request; it only stops pathological payloads. (This is
+# NOT the Kokoro token guard — that lives client-side in lecturn.) Sourced from
+# the shared contract.
+MAX_INPUT_CHARS: int = contract.MAX_INPUT_CHARS
+
+# The encoder (``audio``) stays the sole authority on which formats it can emit;
+# the contract merely advertises the same set. Assert they agree so a change to
+# one side that forgets the other fails loudly at import rather than silently
+# drifting the advertised surface.
+assert set(audio.SUPPORTED_FORMATS) == set(contract.SUPPORTED_FORMATS)
 
 
 class SpeechRequest(BaseModel):
@@ -56,7 +73,7 @@ class SpeechRequest(BaseModel):
     voice: str = voices.DEFAULT_VOICE
     # Single-model server: `model` is accepted but not used for routing.
     model: str = MODEL_ID
-    response_format: str = "mp3"
+    response_format: str = contract.DEFAULT_RESPONSE_FORMAT
     # Kokoro supports playback speed; lecturn doesn't send it, so default 1.0.
     speed: float = Field(default=1.0, gt=0)
 
@@ -102,6 +119,16 @@ def create_app(engine: KokoroEngine | None = None) -> FastAPI:
         text = req.input.strip()
         if not text:
             raise HTTPException(status_code=400, detail="`input` must not be empty.")
+
+        if len(text) > MAX_INPUT_CHARS:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"`input` is {len(text)} characters, over the server's "
+                    f"{MAX_INPUT_CHARS}-character limit. Split it into smaller "
+                    "requests."
+                ),
+            )
 
         fmt = req.response_format.lower()
         if fmt not in audio.SUPPORTED_FORMATS:

@@ -25,14 +25,23 @@ dependencies = [
     # downloads encoding files on first use; the code falls back to a heuristic
     # offline so the test suite stays network-free.
     "tiktoken>=0.13.0",
+    # The single source of truth for the shared Kokoro TTS contract (voice
+    # catalogue, model id, default voice, base URL, token cap). An in-repo path
+    # dependency (see [tool.uv.sources]) so the CLI and the server can never
+    # drift apart on these facts.
+    "lecturn-tts-contract",
 ]
 
 [project.scripts]
 lecturn = "textbook_audiobook.cli:app"
 
+[tool.uv.sources]
+lecturn-tts-contract = { path = "packages/lecturn-tts-contract", editable = true }
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "ruff>=0.9",
 ]
 
 [build-system]
@@ -45,3 +54,22 @@ packages = ["src/textbook_audiobook"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+# Match the wrap width the codebase already uses.
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+# A focused, high-signal rule set: pyflakes (F), pycodestyle (E/W), isort (I),
+# pyupgrade (UP), and flake8-bugbear (B). Deliberately conservative — this is a
+# CI safety net, not a wholesale restyle.
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = [
+    # Typer's public API expects the field default to *be* the call, e.g.
+    # `x: int = typer.Option(...)`. This is the framework idiom, not a bug.
+    "B008",
+    # `class Provider(str, Enum)` -> `StrEnum` would change `str(member)`
+    # semantics (Typer relies on the current behaviour); keep the explicit mix-in.
+    "UP042",
+]

@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+import lecturn_tts_contract as contract
+
 # StepFun's documented hard cap, per the Audio Usage Limits page. This is an
 # API constraint, NOT a tuning parameter — chunks must never exceed it. It is
 # applied uniformly across providers: OpenRouter documents no hard limit, but a
@@ -42,8 +44,9 @@ DEFAULT_RESPONSE_FORMAT: str = "mp3"
 # the same transport is reused with a different base URL, key, and catalogue.
 OPENROUTER_BASE_URL_DEFAULT: str = "https://openrouter.ai/api/v1"
 OPENROUTER_DEFAULT_MODEL: str = "hexgrad/kokoro-82m"
-# Kokoro's highest-graded voice (US female, grade A in hexgrad's VOICES.md).
-OPENROUTER_DEFAULT_VOICE: str = "af_heart"
+# Kokoro's highest-graded voice (US female, grade A in hexgrad's VOICES.md),
+# from the shared contract so both apps agree on the default.
+OPENROUTER_DEFAULT_VOICE: str = contract.DEFAULT_VOICE
 
 # --- Local Kokoro server (self-hosted, OpenAI-compatible) --------------------
 # A third provider for a locally-hosted Kokoro server — ours (see server/) or a
@@ -51,11 +54,11 @@ OPENROUTER_DEFAULT_VOICE: str = "af_heart"
 # behind the same OpenAI-compatible POST /audio/speech shape, so the same
 # transport is reused; only the base URL, the (optional) key, and the bare model
 # id differ. The default base URL is Kokoro-FastAPI's convention (port 8880).
-LOCAL_BASE_URL_DEFAULT: str = "http://127.0.0.1:8880/v1"
+LOCAL_BASE_URL_DEFAULT: str = contract.DEFAULT_BASE_URL
 # Kokoro-FastAPI (and our server) accept the bare model id "kokoro".
-LOCAL_DEFAULT_MODEL: str = "kokoro"
+LOCAL_DEFAULT_MODEL: str = contract.MODEL_ID
 # Same Kokoro voice catalogue as OpenRouter; af_heart is the grade-A default.
-LOCAL_DEFAULT_VOICE: str = "af_heart"
+LOCAL_DEFAULT_VOICE: str = contract.DEFAULT_VOICE
 
 
 @dataclass(frozen=True)
@@ -155,9 +158,10 @@ OPENROUTER_MODELS: dict[str, ModelInfo] = {
         name="hexgrad/kokoro-82m",
         price_per_10k_chars=0.0062,
         description="Kokoro-82M — lightweight open-weight TTS (via OpenRouter)",
-        # Kokoro accepts up to 4096 input tokens per request. The client enforces
-        # this with a safety margin; StepFun models have no token cap (None).
-        max_input_tokens=4096,
+        # Kokoro accepts up to this many input tokens per request (from the shared
+        # contract). The client enforces it with a safety margin; StepFun models
+        # have no token cap (None).
+        max_input_tokens=contract.KOKORO_MAX_INPUT_TOKENS,
     ),
 }
 
@@ -168,45 +172,26 @@ OPENROUTER_MODELS: dict[str, ModelInfo] = {
 # Names cannot collide with StepFun's flat IDs or OpenRouter's ``vendor/model``
 # form — see estimate_cost().
 LOCAL_MODELS: dict[str, ModelInfo] = {
-    "kokoro": ModelInfo(
-        name="kokoro",
+    contract.MODEL_ID: ModelInfo(
+        name=contract.MODEL_ID,
         price_per_10k_chars=0.0,  # self-hosted => free
         description="Kokoro-82M on a self-hosted server (free; your hardware)",
-        # Same 4096-token Kokoro input ceiling as the OpenRouter model; the
-        # client enforces it with the same safety margin.
-        max_input_tokens=4096,
+        # Same Kokoro input ceiling as the OpenRouter model (from the shared
+        # contract); the client enforces it with the same safety margin.
+        max_input_tokens=contract.KOKORO_MAX_INPUT_TOKENS,
     ),
 }
 
-# Kokoro's built-in English voices, keyed by voice ID with a human label and a
-# quality grade taken from hexgrad's VOICES.md. Prefix convention: ``af_``/``am_``
-# = US female/male, ``bf_``/``bm_`` = UK female/male. Kokoro voice IDs cannot
+# Kokoro's built-in voices (id -> human label with quality grade), sourced from
+# the shared ``lecturn_tts_contract`` package — the single source of truth both
+# apps import so the CLI and the server can never drift on the catalogue (the CLI
+# used to re-declare only a subset, which drifted to 18 vs the server's 54).
+# Copied into a fresh dict so the CLI keeps its own {id: label} object. Prefix
+# convention: ``<lang><gender>`` (``af_``/``am_`` = US female/male, ``bf_``/
+# ``bm_`` = UK female/male, plus other languages). Kokoro voice IDs cannot
 # collide with StepFun's, so the resume cache needs no provider tag. The default
-# is ``af_heart`` (grade A). Mirrors the {id: label} shape of VOICES.
-KOKORO_VOICES: dict[str, str] = {
-    # US female
-    "af_heart": "US Female — Heart (A, default)",
-    "af_bella": "US Female — Bella (A-)",
-    "af_nicole": "US Female — Nicole (B-)",
-    "af_aoede": "US Female — Aoede",
-    "af_kore": "US Female — Kore",
-    "af_sarah": "US Female — Sarah (C+)",
-    "af_alloy": "US Female — Alloy",
-    "af_nova": "US Female — Nova (C)",
-    "af_sky": "US Female — Sky (C-)",
-    # US male
-    "am_michael": "US Male — Michael",
-    "am_fenrir": "US Male — Fenrir",
-    "am_puck": "US Male — Puck (C+)",
-    "am_onyx": "US Male — Onyx",
-    "am_echo": "US Male — Echo (D)",
-    # UK female
-    "bf_emma": "UK Female — Emma (B-)",
-    "bf_isabella": "UK Female — Isabella (C)",
-    # UK male
-    "bm_fable": "UK Male — Fable",
-    "bm_george": "UK Male — George (C)",
-}
+# is ``af_heart`` (grade A).
+KOKORO_VOICES: dict[str, str] = dict(contract.KOKORO_VOICES)
 
 # Ordered list of Kokoro voice IDs for convenience.
 KNOWN_KOKORO_VOICES: list[str] = list(KOKORO_VOICES)
@@ -238,8 +223,8 @@ class StepFunConfig:
         response_format: str = DEFAULT_RESPONSE_FORMAT,
         base_url: str | None = None,
         api_key: str | None = None,
-    ) -> "StepFunConfig":
-        resolved_key = api_key or resolve_api_key()
+    ) -> StepFunConfig:
+        resolved_key = api_key or resolve_stepfun_api_key()
         if not resolved_key:
             raise MissingApiKeyError(
                 "No StepFun API key found. Set the STEPFUN_API_KEY environment "
@@ -286,7 +271,7 @@ class OpenRouterConfig:
         response_format: str = DEFAULT_RESPONSE_FORMAT,
         base_url: str | None = None,
         api_key: str | None = None,
-    ) -> "OpenRouterConfig":
+    ) -> OpenRouterConfig:
         resolved_key = api_key or os.environ.get("OPENROUTER_API_KEY")
         if not resolved_key:
             raise MissingApiKeyError(
@@ -338,7 +323,7 @@ class LocalConfig:
         response_format: str = DEFAULT_RESPONSE_FORMAT,
         base_url: str | None = None,
         api_key: str | None = None,
-    ) -> "LocalConfig":
+    ) -> LocalConfig:
         # Local servers are typically unauthenticated, but the OpenAI SDK needs a
         # non-empty api_key. Use LOCAL_TTS_API_KEY if the user set one (e.g. a
         # reverse proxy in front of the server), else a harmless placeholder.
@@ -375,7 +360,7 @@ class MissingApiKeyError(RuntimeError):
     """
 
 
-def resolve_api_key() -> str | None:
+def resolve_stepfun_api_key() -> str | None:
     """Return the first available StepFun API key from the environment."""
 
     return (
